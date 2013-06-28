@@ -22,20 +22,6 @@ double net_comm_time = 0.;
 
 global_data global;
 
-void reduce_step(string master_location, float *betaTx_delta, float *beta_new, ulong_t example_count)
-{
-	if(master_location != current_master) 
-		all_reduce_init(master_location, unique_id, total, node);
-    
-	//reduce((char*)buffer, n*sizeof(float), socks.parent, socks.children);
-
-	float *buffer[2];
-	buffer[0] = (float*)calloc(example_count, sizeof(float));
-	buffer[1] = (float*)calloc(example_count, sizeof(float));
-	get_kids_vectors(buffer, example_count * sizeof(float), socks.parent, socks.children);
-	//broadcast((char*)buffer, n*sizeof(float), socks.parent, socks.children);
-}
-
 void accumulate_vector(string master_location, float *weights, uint32_t length)
 {
   ftime(&t_start);

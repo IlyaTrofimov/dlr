@@ -2,7 +2,7 @@
 #include "accumulate.h"
 #include <cstdlib>
 #include <string>
-#include <cstdlib>
+#include <cstdio>
 
 using std::string;
 
