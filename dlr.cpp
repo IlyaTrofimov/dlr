@@ -7,6 +7,7 @@
 #include<cfloat>
 #include<cstring>
 #include<sys/stat.h>
+#include "asa047.h"
 
 #include "accumulate.h"
 #include "allreduce.h"
@@ -238,26 +239,37 @@ int file_exists(char * filename)
 	return (ret == 0);
 }
 
-double get_combined_loss(float alpha[3], float *betaTx, float *betaTx_delta[3], float *beta, float *beta_new[3], ulong_t example_count, ulong_t feature_count, float lambda_1, int *all_y) {
+
+float *g_betaTx;
+float *g_betaTx_delta[3];
+float *g_beta;
+float *g_beta_delta[3];
+ulong_t g_example_count;
+ulong_t g_feature_count;
+float g_lambda_1;
+int *g_all_y;
+int g_n;
+
+double get_combined_loss(double alpha[3]) {
 
 	double loss = 0.0;
 
-	for (int i = 0; i <= feature_count; i++) {
-		double beta_final = beta[i];
+	for (int i = 0; i < g_feature_count; i++) {
+		double beta_final = g_beta[i];
 
-		for (int k = 0; k < 3; k++) {
-			beta_final += alpha[k] * (beta_new[k][i] - beta[i]);
+		for (int k = 0; k < g_n; k++) {
+			beta_final += alpha[k] * g_beta_delta[k][i];
 		}
 
-		loss += lambda_1 * fabs(beta_final);
+		loss += g_lambda_1 * fabs(beta_final);
 	}
 
-	for (int i = 0; i <= example_count; i++) {
-		float logit = betaTx[i];
-		for (int k = 0; k < 3; k++) 
-			logit += alpha[k] * betaTx_delta[k][i];
+	for (int i = 0; i < g_example_count; i++) {
+		float logit = g_betaTx[i];
+		for (int k = 0; k < g_n; k++) 
+			logit += alpha[k] * g_betaTx_delta[k][i];
 
-		logit *= -all_y[i];
+		logit *= -g_all_y[i];
 
 		if (logit > 10)
 			loss += logit;
@@ -268,19 +280,197 @@ double get_combined_loss(float alpha[3], float *betaTx, float *betaTx_delta[3], 
 	return loss;
 }
 
-void combine_vectors(string master_location, float *betaTx_delta, float *beta_new, ulong example_count)
-{
-	char *buffer[2];
-	buffer[0] = (char*)calloc(example_count, sizeof(float));
-	buffer[1] = (char*)calloc(example_count, sizeof(float));
+#define SQUARE(x) ((x) * (x))
 
-	get_kids_vectors(master_location, (char*)betaTx_delta, buffer, example_count * sizeof(float), global.unique_id, global.total, global.node);
+void print_full_vectors(float *full_vector, ulong_t reduce_vector_count, char *buffer[2], int *child_sockets)
+{
+	char filename[32];
+	sprintf(filename, "node%d_%d.me\0", global.node, global.total);
+
+	FILE *file = fopen(filename, "w");
+
+	for (int i = 0; i < reduce_vector_count; i++)
+		fprintf(file, "%f\n", full_vector[i]);
+
+	fclose(file);
+
+	for (int k = 0; k < 2; k++) {
+		if (child_sockets[k] != -1) {
+			sprintf(filename, "node%d_%d.child%d\0", global.node, global.total, k);
+
+			FILE *file = fopen(filename, "w");
+
+			for (int i = 0; i < reduce_vector_count; i++)
+				fprintf(file, "%f\n", ((float*)buffer[k])[i]);
+
+			fclose(file);
+		}
+	}
 }
+
+void combine_vectors(string master_location, float *betaTx_delta, float *beta, float *beta_new, ulong example_count, ulong_t feature_count, double loss, int type)
+{
+	if (type == 0) { // add all deltas
+		accumulate_vector(master_location, betaTx_delta, example_count);
+		accumulate_vector(master_location, beta_new, feature_count);
+
+		for (int i = 0; i < feature_count; i++)
+			beta_new[i] -= (global.total - 1) * beta[i];
+
+		return;
+	}
+	
+	ulong_t reduce_vector_count = example_count + feature_count;
+	float *full_vector = (float*)calloc(reduce_vector_count, sizeof(float));
+
+	memcpy(full_vector, betaTx_delta, example_count * sizeof(float));
+
+	for (int i = 0; i < feature_count; i++)
+		full_vector[example_count + i] = beta_new[i] - beta[i];
+	
+	char *buffer[2];
+	int *child_sockets;
+	buffer[0] = (char*)calloc(reduce_vector_count, sizeof(float));
+	buffer[1] = (char*)calloc(reduce_vector_count, sizeof(float));
+
+	get_kids_vectors(master_location, (char*)full_vector, buffer, reduce_vector_count * sizeof(float), global.unique_id, global.total, global.node, &child_sockets);
+
+	print_full_vectors(full_vector, reduce_vector_count, buffer, child_sockets);
+
+	g_betaTx_delta[0] = full_vector;
+	g_beta_delta[0] = full_vector + example_count;
+
+	int n = 1;
+	for (int k = 0; k < 2; k++) {
+		if (child_sockets[k] != -1) {
+			g_betaTx_delta[n] = (float*)(buffer[k]);
+			g_beta_delta[n] = ((float*)(buffer[k]) + example_count);
+			n++;
+		}
+	}
+
+	g_n = n;
+
+	if (n > 1) {
+		double xmin[n];
+
+		for (int i = 0; i < n; i++) {
+			xmin[0] = 0.0;
+		}
+
+		if (type == 1) {
+			// try greedy
+			
+			int best_idx = 0;
+			double min_loss = DBL_MAX;
+
+			for (int i = 0; i < n; i++) {
+				xmin[i] = 1.0;
+
+				double loss = get_combined_loss(xmin);
+				printf("%d %f\n", i, loss);
+
+				if (loss < min_loss) {
+					min_loss = loss;
+					best_idx = i;
+				}
+
+				xmin[i] = 0.0;
+			}
+
+			xmin[best_idx] = 1.0;
+
+			for (int i = 0; i < n; i++) {
+				printf("x[%d] = %f\n", i, xmin[i]);
+			}
+		}
+		else { // try Nelder-Mead
+			double start[n];
+			double ynewlo;
+			double reqmin = loss; //SQUARE(1.0e-2 * loss);
+			double step[n];
+			int konvge = 5;
+			int kcount = 100;
+			int icount;
+			int numres;
+			int ifault;
+
+			for (int i = 0; i < n; i++) {
+				start[i] = 1.0;
+				step[i] = 0.5;
+				xmin[0] = 0.0;
+			}
+
+			nelmin(get_combined_loss, n, start, xmin, &ynewlo, reqmin, step, konvge, kcount, &icount, &numres, &ifault);
+
+			for (int i = 0; i < n; i++) {
+				printf("x[%d] = %f icount = %d numres = %d ifault = %d\n", i, xmin[i], icount, numres, ifault);
+			}
+		}
+
+		//
+		// Calc best
+		//
+		for (int i = 0; i < reduce_vector_count; i++) {
+			full_vector[i] *= xmin[0];
+
+			int k = 1;
+
+			if (child_sockets[0] != -1) {
+				full_vector[i] += xmin[k] * ((float*)buffer[0])[i];
+				k++;
+			}
+
+			if (child_sockets[1] != -1) {
+				full_vector[i] += xmin[k] * ((float*)buffer[1])[i];
+			}
+		}
+	}
+
+	send_to_parent((char*)full_vector, reduce_vector_count * sizeof(float));
+	broadcast_buffer(full_vector, reduce_vector_count);
+
+	memcpy(betaTx_delta, full_vector, example_count * sizeof(float));
+
+	for (int i = 0; i < feature_count; i++)
+		beta_new[i] = beta[i] + full_vector[example_count + i];
+
+	free(full_vector);
+	free(buffer[0]);
+	free(buffer[1]);
+}
+
+void get_best_alpha(float *betaTx, float *betaTx_delta, float *beta, float *beta_new, ulong_t example_count, ulong_t feature_count, float lambda_1, int *all_y, float *best_alpha, double *min_loss)
+{
+	*min_loss = DBL_MAX;
+	*best_alpha = 0.0;
+
+	for (int i = 0; i <= 22; i++) {
+		double alpha;
+
+		if (i < 11)
+			alpha = pow(0.5, i);
+		else if (i == 11)
+			alpha = 0.0;
+		else
+			alpha = -pow(0.5, 22 - i);
+
+		double loss = get_loss(alpha, betaTx, betaTx_delta, beta, beta_new, example_count, feature_count, lambda_1, all_y);
+		
+		printf("alpha %f loss %f \n", alpha, loss);
+
+		if (loss < *min_loss) {
+			*best_alpha = alpha;
+			*min_loss = loss;
+		}
+	}
+}
+
 
 int main(int argc, char **argv)
 {
 	if (argc < 5) {
-		printf("Usage: dlr dataset example_count feature_count lambda_1 [master node total]");
+		printf("Usage: dlr dataset example_count feature_count lambda_1 [master node total]\n");
 		return 0;
 	}
 
@@ -428,45 +618,35 @@ int main(int argc, char **argv)
 
 		update_feature(file, count, sum_w_q_x, sum_w_x_2, lambda_1, &feature_start_pos, prev_feature_id, beta_new, betaTx_delta);
 
+		double min_loss;
+		float best_alpha;
+	
+		printf("Testing local delta:\n");
+		get_best_alpha(betaTx, betaTx_delta, beta, beta_new, example_count, feature_count, lambda_1, all_y, &best_alpha, &min_loss);
+		printf("best_alpha = %f min_loss = %f\n", best_alpha, min_loss);
+
+
 		//
 		// Accumulate deltas of beta
 		//
 		if (distributed) {	
-			accumulate_vector(master_location, betaTx_delta, example_count);
-			accumulate_vector(master_location, beta_new, feature_count);
-			printf("network time, sec %f \n", get_comm_time() * 1.0e-3);
+			g_betaTx = betaTx;
+			g_beta = beta;
+			g_example_count = example_count;
+			g_feature_count = feature_count;
+			g_lambda_1 = lambda_1;
+			g_all_y = all_y;
 
-			for (int i = 0; i < feature_count; i++)
-				beta_new[i] -= (global.total - 1) * beta[i];
+			combine_vectors(master_location, betaTx_delta, beta, beta_new, example_count, feature_count, prev_newton_loss, 1);
+		
+			printf("network time, sec %f \n", get_comm_time() * 1.0e-3);
 		}
 
 		//
 		// Linear search
 		//
-		double min_loss = DBL_MAX;
-		float best_alpha = 0.0;
-
-		printf("\n");
-
-		for (int i = 0; i <= 22; i++) {
-			double alpha;
-
-			if (i < 11)
-				alpha = pow(0.5, i);
-			else if (i == 11)
-				alpha = 0.0;
-			else
-				alpha = -pow(0.5, 22 - i);
-
-			double loss = get_loss(alpha, betaTx, betaTx_delta, beta, beta_new, example_count, feature_count, lambda_1, all_y);
-			
-			printf("alpha %f loss %f \n", alpha, loss);
-
-			if (loss < min_loss) {
-				best_alpha = alpha;
-				min_loss = loss;
-			}
-		}
+		printf("Testing combined delta:\n");
+		get_best_alpha(betaTx, betaTx_delta, beta, beta_new, example_count, feature_count, lambda_1, all_y, &best_alpha, &min_loss);
 
 		//
 		// Check termination criteria

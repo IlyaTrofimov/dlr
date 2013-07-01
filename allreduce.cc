@@ -223,7 +223,6 @@ void addbufs(float* buf1, float* buf2, int n) {
 
 
 void pass_up(char* buffer, int left_read_pos, int right_read_pos, int& parent_sent_pos, int parent_sock, int n) {
-  
   //cerr<<left_read_pos<<" "<<right_read_pos<<" "<<parent_sent_pos<<" "<<n<<endl;
   int my_bufsize = min(buf_size, ((int)(floor(left_read_pos/(sizeof(float)))*sizeof(float)) - parent_sent_pos));
   my_bufsize = min(my_bufsize, ((int)(floor(right_read_pos/(sizeof(float)))*sizeof(float)) - parent_sent_pos));
@@ -256,13 +255,14 @@ void pass_down(char* buffer, int parent_read_pos, int&children_sent_pos, int* ch
 
 }
 
-void get_kids_vectors(string master_location, char *buffer, char **child_buffer, int n, size_t unique_id, size_t total, size_t node)
+void get_kids_vectors(string master_location, char *buffer, char **child_buffer, int n, size_t unique_id, size_t total, size_t node, int **child_sockets_out)
 {
 
   if(master_location != current_master) 
     all_reduce_init(master_location, unique_id, total, node);
  
   int *child_sockets = socks.children;
+  *child_sockets_out = child_sockets;
 
   fd_set fds;
   FD_ZERO(&fds);
@@ -335,19 +335,26 @@ void get_kids_vectors(string master_location, char *buffer, char **child_buffer,
 	}
       }
     }  
+}
 
+void send_to_parent(char *buffer, int n)
+{
+  int sent_total = 0;
   if (socks.parent != -1) {
     int pos = 0;
     int write_size; 
     while (pos < n) {
       int size = min(1024, n - pos);
-      write_size = write(socks.parent, buffer + pos, 1024);
+      write_size = write(socks.parent, buffer + pos, size);
+      sent_total += write_size;
       if (write_size < size) {
         cerr << "ERROR writing to parent" << endl;
       }
       pos += size;
     }
   }
+
+  cout << "n = " << n << " sent_total " << sent_total << "\n";
 }
 
 void reduce(char* buffer, int n, int parent_sock, int* child_sockets) {
@@ -491,6 +498,11 @@ void all_reduce(float* buffer, int n, string master_location, size_t unique_id, 
     all_reduce_init(master_location, unique_id, total, node);
     
   reduce((char*)buffer, n*sizeof(float), socks.parent, socks.children);
+  broadcast((char*)buffer, n*sizeof(float), socks.parent, socks.children);
+}
+
+void broadcast_buffer(float* buffer, int n)
+{
   broadcast((char*)buffer, n*sizeof(float), socks.parent, socks.children);
 }
 
