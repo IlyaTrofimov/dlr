@@ -255,14 +255,14 @@ void pass_down(char* buffer, int parent_read_pos, int&children_sent_pos, int* ch
 
 }
 
-void get_kids_vectors(string master_location, char *buffer, char **child_buffer, int n, size_t unique_id, size_t total, size_t node, int **child_sockets_out)
+void get_kids_vectors(string master_location, char *child_buffer[2], int n, size_t unique_id, size_t total, size_t node, int **child_sockets_out)
 {
 
   if(master_location != current_master) 
     all_reduce_init(master_location, unique_id, total, node);
  
   int *child_sockets = socks.children;
-  *child_sockets_out = child_sockets;
+  *child_sockets_out = socks.children;
 
   fd_set fds;
   FD_ZERO(&fds);
@@ -354,7 +354,7 @@ void send_to_parent(char *buffer, int n)
     }
   }
 
-  cout << "n = " << n << " sent_total " << sent_total << "\n";
+  cout << "send to parent n = " << n << " sent_total " << sent_total << "\n";
 }
 
 void reduce(char* buffer, int n, int parent_sock, int* child_sockets) {
@@ -501,9 +501,9 @@ void all_reduce(float* buffer, int n, string master_location, size_t unique_id, 
   broadcast((char*)buffer, n*sizeof(float), socks.parent, socks.children);
 }
 
-void broadcast_buffer(float* buffer, int n)
+void broadcast_buffer(char *buffer, int n)
 {
-  broadcast((char*)buffer, n*sizeof(float), socks.parent, socks.children);
+  broadcast(buffer, n, socks.parent, socks.children);
 }
 
 node_socks::~node_socks()

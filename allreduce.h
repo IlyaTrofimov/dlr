@@ -12,8 +12,8 @@ This implements the allreduce function of MPI.
 #include <string>
 
 void all_reduce(float* buffer, int n, std::string master_location, size_t unique_id, size_t total, size_t node);
-void get_kids_vectors(std::string master_location, char *buffer, char **child_buffer, int n, size_t unique_id, size_t total, size_t node, int **child_sockets);
-void broadcast_buffer(float* buffer, int n);
+void get_kids_vectors(std::string master_location, char *child_buffer[2], int n, size_t unique_id, size_t total, size_t node, int **child_sockets);
+void broadcast_buffer(char* buffer, int n);
 void send_to_parent(char *buffer, int n);
 
 #endif
