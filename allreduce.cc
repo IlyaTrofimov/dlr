@@ -344,7 +344,7 @@ void send_to_parent(char *buffer, int n)
     int pos = 0;
     int write_size; 
     while (pos < n) {
-      int size = min(1024, n - pos);
+      int size = min(buf_size, n - pos);
       write_size = write(socks.parent, buffer + pos, size);
       sent_total += write_size;
       if (write_size < size) {
