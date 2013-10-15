@@ -354,7 +354,7 @@ void send_to_parent(char *buffer, int n)
     }
   }
 
-  cout << "send to parent n = " << n << " sent_total " << sent_total << "\n";
+  //cout << "send to parent n = " << n << " sent_total " << sent_total << "\n";
 }
 
 void reduce(char* buffer, int n, int parent_sock, int* child_sockets) {
