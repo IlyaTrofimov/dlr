@@ -21,8 +21,12 @@
 
 namespace po = boost::program_options;
 
+typedef uint32_t example_t;
+typedef uint32_t feature_t;
+
 using std::cout;
 using std::cerr;
+using std::endl;
 using std::string;
 using std::map;
 using std::vector;
@@ -79,6 +83,14 @@ void stop_timer(const char* name)
 	}
 }
 
+void sync_nodes()
+{	
+	start_timer("sync nodes");
+	float tmp_vector[1] = {0.0};
+	accumulate_vector(g_master_location, tmp_vector, 1);
+	stop_timer("sync nodes");
+}
+
 string to_string(int i)
 {
 	std::stringstream out;
@@ -98,7 +110,7 @@ static inline float soft_threshold(float x, float a)
 
 char g_buffer[1<<20];
 
-int parse_line(FILE *file, ulong *feature_id, ulong *example_id, int *y, float *weight, float *x, fpos_t *fpos)
+int parse_line(FILE *file, feature_t *feature_id, example_t *example_id, int *y, float *weight, float *x, fpos_t *fpos)
 {
 	if (fpos)
 		fgetpos(file, fpos);
@@ -125,38 +137,214 @@ int parse_line(FILE *file, ulong *feature_id, ulong *example_id, int *y, float *
 	return 0;
 }
 
-int parse_line_cache(FILE *file, ulong *feature_id, ulong *example_id, int *y, float *weight, float *x, fpos_t *fpos)
+class Cache
 {
-	if (fpos)
-		fgetpos(file, fpos);
+public:
+	Cache() {};
+	void Create(const char *dataset_filename, const char *cache_filename, feature_t *max_feature_id, example_t *max_example_id, ulong *lines_count, example_t *unique_features);
+	int ReadVariable(feature_t *feature_id);
+	int ReadLine(example_t *example_id, float *x, int *y, float *weight);
+	void MoveToStartVariable();
+	void Rewind();
+	int* GetY();
+	void InitY(example_t example_count, feature_t feature_count, bool distributed, const po::variables_map& vm);
+	~Cache();
 
-	if (!fread(feature_id, sizeof(ulong), 1, file))
+private:
+	FILE *_file;
+	feature_t _feature_id;
+	bool _is_new_feature;
+	fpos_t _start_feature_pos;
+	int *_all_y;
+
+	vector<float> _y;
+	vector<float> _weight;	
+};
+
+Cache::~Cache()
+{
+	fclose(_file);
+	free(_all_y);
+}
+
+int* Cache::GetY()
+{
+	return _all_y;
+}
+
+void Cache::InitY(example_t example_count, feature_t feature_count, bool distributed, const po::variables_map& vm)
+{
+	Rewind();
+	_all_y = (int*)calloc(example_count, sizeof(int));
+
+	//
+	// Synchronize all_y at nodes (some nodes may not have full list of the examples)
+	//
+	if (distributed) {
+		if (vm["sync"].as<int>()) sync_nodes();
+
+		start_timer("sync all_y");
+		float *all_y_float = (float*)calloc(example_count, sizeof(float));
+
+		for (int i = 0; i < _y.size(); i++)			
+			all_y_float[i] = _y[i];
+
+		accumulate_vector(g_master_location, all_y_float, example_count);
+		printf("network time, sec %f \n", get_comm_time() * 1.0e-3);
+
+		for (int i = 0; i < example_count; i++)			
+			_all_y[i] = (all_y_float[i] < 0 ? -1 : 1);
+
+		free(all_y_float);
+		stop_timer("sync all_y");
+	}
+	else {
+		for (int i = 0; i < example_count; i++)			
+			_all_y[i] = _y[i];
+	}
+}
+
+void Cache::Create(const char *dataset_filename, const char *cache_filename, feature_t *max_feature_id, example_t *max_example_id, ulong *lines_count, feature_t *unique_features)
+{
+	start_timer("creating cache");
+	cout << "Creating cache " << cache_filename << "\n";
+
+	FILE *file_dataset = fopen(dataset_filename, "r");
+	FILE *file_cache = fopen(cache_filename, "w");
+
+	feature_t prev_feature_id = 0;
+	example_t prev_example_id = 0;
+	ulong line_num = 0;
+	*max_feature_id = 0;
+	*max_example_id = 0;
+	*unique_features = 0;
+
+	_y.resize(0);
+	_weight.resize(0);
+
+	while (!feof(file_dataset)) {
+
+		feature_t feature_id;
+		example_t example_id;
+		int y;
+		float weight, x; 
+
+		while (parse_line(file_dataset, &feature_id, &example_id, &y, &weight, &x, NULL)) {
+
+			line_num++;
+
+			if ((prev_feature_id == feature_id) && (prev_example_id == example_id) && (line_num != 1)) // bad situation
+				continue;
+
+			if (prev_feature_id != feature_id) {
+				(*unique_features)++;
+				
+				example_t zero_example = 0;	
+				float zero_x = 0.0;
+
+				if (line_num != 1) {
+					fwrite(&zero_example, sizeof(zero_example), 1, file_cache);
+					fwrite(&zero_x, sizeof(zero_x), 1, file_cache);
+				}
+
+				fwrite(&feature_id, sizeof(feature_id), 1, file_cache);
+			}
+
+			if (example_id + 1 > _y.size()) {
+				_y.resize(example_id + 1);
+				_weight.resize(example_id + 1);
+			}
+			
+			_y[example_id] = y;
+			_weight[example_id] = weight;
+
+			fwrite(&example_id, sizeof(example_id), 1, file_cache);
+			fwrite(&x, sizeof(x), 1, file_cache);
+
+			if (feature_id > *max_feature_id)
+				*max_feature_id = feature_id;
+
+			if (example_id > *max_example_id)
+				*max_example_id = example_id;
+
+			prev_feature_id = feature_id;
+			prev_example_id = example_id;
+		}
+	}
+
+	*lines_count = line_num;
+	fclose(file_dataset);
+	fclose(file_cache);
+	stop_timer("creating cache");
+
+	_file = fopen(cache_filename, "r");
+	_is_new_feature = true;
+	fgetpos(_file, &_start_feature_pos);
+}
+
+void Cache::MoveToStartVariable()
+{
+	fsetpos(_file, &_start_feature_pos);	
+	_is_new_feature = true;
+}
+
+int Cache::ReadVariable(feature_t *feature_id)
+{
+	if (_is_new_feature) {
+
+		fgetpos(_file, &_start_feature_pos);
+
+		if (!fread(feature_id, sizeof(feature_t), 1, _file))
+			return 0;
+		_is_new_feature = false;
+	}
+}
+
+void Cache::Rewind() 
+{
+	rewind(_file);
+	_is_new_feature = true;
+	fgetpos(_file, &_start_feature_pos);
+}
+
+int Cache::ReadLine(example_t *example_id, float *x, int *y, float *weight)
+{
+	if (_is_new_feature)
+		return 0;	
+
+	if (!fread(example_id, sizeof(example_t), 1, _file))
 		return 0;
-	if (!fread(example_id, sizeof(ulong), 1, file))
+	if (!fread(x, sizeof(float), 1, _file))
 		return 0;
-	if (!fread(y, sizeof(int), 1, file))
+
+	if ((*example_id == 0) && (*x == 0.0)) {
+		_is_new_feature = true;
 		return 0;
-	if (!fread(weight, sizeof(float), 1, file))
-		return 0;
-	if (!fread(x, sizeof(float), 1, file))
-		return 0;
+	}
+
+	*y = _all_y[*example_id];
+	*weight = _weight[*example_id];
 
 	return 1;
 }
 
-void update_betaTx(FILE *file, int count, float delta_beta, float *betaTx_delta)
-{
-	for (int i = 0; i < count; i++) {
-		ulong feature_id, example_id;
-		int y;
-		float weight, x; 
+Cache g_cache;
 
-		if (parse_line_cache(file, &feature_id, &example_id, &y, &weight, &x, NULL))
-			betaTx_delta[example_id] += delta_beta * x;
+void update_betaTx(float delta_beta, float *betaTx_delta)
+{
+	feature_t feature_id;
+	example_t example_id;
+	int y;
+	float weight, x;
+	
+	g_cache.ReadVariable(&feature_id); 
+
+	while(g_cache.ReadLine(&example_id, &x, &y, &weight)) {
+		betaTx_delta[example_id] += delta_beta * x;
 	}
 }
 
-double get_qloss(float *betaTx, float *betaTx_delta, float *beta, float *beta_new, ulong example_count, ulong feature_count, float lambda_1, int *all_y)
+double get_qloss(float *betaTx, float *betaTx_delta, float *beta, float *beta_new, example_t example_count, feature_t feature_count, float lambda_1, int *all_y)
 {
 	double qloss = 0.0;
 
@@ -181,50 +369,56 @@ double get_qloss(float *betaTx, float *betaTx_delta, float *beta, float *beta_ne
 	return qloss;
 }
 
-float* get_grad(const char *cache_filename, ulong example_count, ulong feature_count, float lambda_1, float *beta)
+float* get_grad(const char *cache_filename, example_t example_count, feature_t feature_count, float lambda_1, float *beta)
 {
 	float *y_betaTx = (float*)calloc(example_count, sizeof(float));
 	float *grad = (float*)calloc(feature_count, sizeof(float));
-	ulong feature_id, example_id;
+	feature_t feature_id;
+	example_t example_id;
 	int y;
 	float weight, x; 
 
-	FILE *file = fopen(cache_filename, "r");
+	g_cache.Rewind();
 
-	while (parse_line_cache(file, &feature_id, &example_id, &y, &weight, &x, NULL)) {
-		y_betaTx[example_id] += y * beta[feature_id] * x;
+	while (g_cache.ReadVariable(&feature_id)) {
+		while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
+			y_betaTx[example_id] += y * beta[feature_id] * x;
+		}
 	}
 
-	rewind(file);
+	g_cache.Rewind();
 
-	while (parse_line_cache(file, &feature_id, &example_id, &y, &weight, &x, NULL)) {
-		grad[feature_id] += - y * x / (1.0 + exp(y_betaTx[example_id]));
+	while (g_cache.ReadVariable(&feature_id)) {
+		while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
+			grad[feature_id] += - y * x / (1.0 + exp(y_betaTx[example_id]));
+		}
 	}
 
 	for (int i = 0; i < feature_count; i++)
 		grad[i] = soft_threshold(grad[i], lambda_1);
 
-	fclose(file);
 	free(y_betaTx);
 
 	return grad;
 }
 
-double get_loss_exact(const char *cache_filename, ulong example_count, ulong feature_count, float lambda_1, float alpha, float *beta, float *beta_new)
+double get_loss_exact(const char *cache_filename, example_t example_count, feature_t feature_count, float lambda_1, float alpha, float *beta, float *beta_new)
 {
 	start_timer("debug: calc loss exact");
 	float *y_betaTx = (float*)calloc(example_count, sizeof(float));
-	ulong feature_id, example_id;
+	feature_t feature_id;
+	example_t example_id;
 	int y;
 	float weight, x; 
 
-	FILE *file = fopen(cache_filename, "r");
+	g_cache.Rewind();
 
-	while (parse_line_cache(file, &feature_id, &example_id, &y, &weight, &x, NULL)) {
-		y_betaTx[example_id] += y * ((1 - alpha) * beta[feature_id] + alpha * beta_new[feature_id])* x;
+	while (g_cache.ReadVariable(&feature_id)) {
+		while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
+			y_betaTx[example_id] += y * ((1 - alpha) * beta[feature_id] + alpha * beta_new[feature_id])* x;
+		}
 	}
 
-	fclose(file);
 	accumulate_vector(g_master_location, y_betaTx, example_count);
 
 	double loss = 0.0;
@@ -247,7 +441,7 @@ double get_loss_exact(const char *cache_filename, ulong example_count, ulong fea
 	return loss;
 }
 
-double get_grad_norm_exact(const char *cache_filename, ulong example_count, ulong feature_count, float lambda_1, float *beta)
+double get_grad_norm_exact(const char *cache_filename, example_t example_count, feature_t feature_count, float lambda_1, float *beta)
 {
 	start_timer("debug: calc gradient");
 	double grad_norm = 0.0;
@@ -261,7 +455,7 @@ double get_grad_norm_exact(const char *cache_filename, ulong example_count, ulon
 	return grad_norm;
 }
 
-double get_loss(float alpha, float *betaTx, float *betaTx_delta, float *beta, float *beta_new, ulong example_count, ulong feature_count, float lambda_1, int *all_y)
+double get_loss(float alpha, float *betaTx, float *betaTx_delta, float *beta, float *beta_new, example_t example_count, feature_t feature_count, float lambda_1, int *all_y)
 {
 	double loss = 0.0;
 
@@ -283,7 +477,7 @@ double get_loss(float alpha, float *betaTx, float *betaTx_delta, float *beta, fl
 
 #define SGN(x) (((x) > 0)  - ((x) < 0))
 
-void update_feature(FILE *file, ulong count, float sum_w_q_x, float sum_w_x_2, float lambda_1, float beta_max, const fpos_t *feature_start_pos, ulong feature_id, float *beta_new, float *betaTx_delta)
+void update_feature(float sum_w_q_x, float sum_w_x_2, float lambda_1, float beta_max, feature_t feature_id, float *beta_new, float *betaTx_delta)
 {
 	float beta_after_cd = 0.0;
 		
@@ -303,20 +497,15 @@ void update_feature(FILE *file, ulong count, float sum_w_q_x, float sum_w_x_2, f
 		else
 			beta_after_cd = beta_new[feature_id] - beta_step_max;
 
-	fpos_t cur_fpos;
-	fgetpos(file, &cur_fpos);
-
-	fsetpos(file, feature_start_pos);
-	update_betaTx(file, count, beta_after_cd - beta_new[feature_id], betaTx_delta);
-
-	fsetpos(file, &cur_fpos);
+	g_cache.MoveToStartVariable();
+	update_betaTx(beta_after_cd - beta_new[feature_id], betaTx_delta);
 
 	beta_new[feature_id] = beta_after_cd;
 }
 
-ulong get_bad_coordinates(float *beta, ulong feature_count, float beta_max)
+feature_t get_bad_coordinates(float *beta, feature_t feature_count, float beta_max)
 {
-	ulong count = 0;
+	feature_t count = 0;
 
 	for (int i = 0; i < feature_count; i++)
 		count += (fabs(beta[i] - beta_max) < 1.0e-6);
@@ -324,59 +513,6 @@ ulong get_bad_coordinates(float *beta, ulong feature_count, float beta_max)
 	return count;
 }
 
-void create_cache(const char *dataset_filename, const char *cache_filename, ulong *max_feature_id, ulong *max_example_id, ulong *lines_count, ulong *unique_features)
-{
-	start_timer("creating cache");
-	cout << "Creating cache " << cache_filename << "\n";
-
-	FILE *file_dataset = fopen(dataset_filename, "r");
-	FILE *file_cache = fopen(cache_filename, "w");
-
-	ulong prev_feature_id = 0;
-	ulong prev_example_id = 0;
-	ulong line_num = 0;
-	*max_feature_id = 0;
-	*max_example_id = 0;
-	*unique_features = 0;
-
-	while (!feof(file_dataset)) {
-
-		ulong feature_id, example_id;
-		int y;
-		float weight, x; 
-
-		while (parse_line(file_dataset, &feature_id, &example_id, &y, &weight, &x, NULL)) {
-
-			line_num++;
-
-			if ((prev_feature_id == feature_id) && (prev_example_id == example_id) && (line_num != 1)) // bad situation
-				continue;
-
-			if (prev_feature_id != feature_id)
-				(*unique_features)++;				
-
-			fwrite(&feature_id, sizeof(feature_id), 1, file_cache);
-			fwrite(&example_id, sizeof(example_id), 1, file_cache);
-			fwrite(&y, sizeof(y), 1, file_cache);
-			fwrite(&weight, sizeof(weight), 1, file_cache);
-			fwrite(&x, sizeof(x), 1, file_cache);
-
-			if (feature_id > *max_feature_id)
-				*max_feature_id = feature_id;
-
-			if (example_id > *max_example_id)
-				*max_example_id = example_id;
-
-			prev_feature_id = feature_id;
-			prev_example_id = example_id;
-		}
-	}
-
-	*lines_count = line_num;
-	fclose(file_dataset);
-	fclose(file_cache);
-	stop_timer("creating cache");
-}
 
 int file_exists(const char *filename)
 {
@@ -390,8 +526,8 @@ float *g_betaTx;
 float *g_betaTx_delta[3];
 float *g_beta;
 float *g_beta_delta[3];
-ulong g_example_count;
-ulong g_feature_count;
+feature_t g_example_count;
+example_t g_feature_count;
 float g_lambda_1;
 int *g_all_y;
 int g_n;
@@ -627,7 +763,7 @@ void print_vector(const char* name, float *v, int n)
 	printf("\n");
 }
 
-void get_best_alpha(float *betaTx, float *betaTx_delta, float *beta, float *beta_new, ulong example_count, ulong feature_count, float lambda_1, int *all_y, float *best_alpha, double *min_loss)
+void get_best_alpha(float *betaTx, float *betaTx_delta, float *beta, float *beta_new, example_t example_count, feature_t feature_count, float lambda_1, int *all_y, float *best_alpha, double *min_loss)
 {
 	*min_loss = DBL_MAX;
 	*best_alpha = 0.0;
@@ -655,7 +791,7 @@ void get_best_alpha(float *betaTx, float *betaTx_delta, float *beta, float *beta
 
 string g_cache_filename;
 
-void back_search(double zero_alpha_loss, float *betaTx, float *betaTx_delta, float *beta, float *beta_new, ulong example_count, ulong feature_count, float lambda_1, int *all_y, 
+void back_search(double zero_alpha_loss, float *betaTx, float *betaTx_delta, float *beta, float *beta_new, example_t example_count, feature_t feature_count, float lambda_1, int *all_y, 
 			float *best_alpha, double *min_loss, int *count)
 {
 	if (count) *count = 0;
@@ -695,13 +831,6 @@ void back_search(double zero_alpha_loss, float *betaTx, float *betaTx_delta, flo
 	*best_alpha = 0.0;
 	*min_loss = zero_alpha_loss;
 }
-void sync_nodes()
-{	
-	start_timer("sync nodes");
-	float tmp_vector[1] = {0.0};
-	accumulate_vector(g_master_location, tmp_vector, 1);
-	stop_timer("sync nodes");
-}
 
 void get_final_coeffs(double xmin[], float *coeffs)
 {
@@ -736,7 +865,7 @@ int myrandom (int i)
 	return rand() % i;
 }
 
-void combine_vectors(float *betaTx_delta, float *beta, float *beta_new, ulong example_count, ulong feature_count, double loss, int type, float coeffs[], int random_count)
+void combine_vectors(float *betaTx_delta, float *beta, float *beta_new, example_t example_count, feature_t feature_count, double loss, int type, float coeffs[], int random_count)
 {
 	if (type == 0) { // add all deltas
 
@@ -916,7 +1045,7 @@ void combine_vectors(float *betaTx_delta, float *beta, float *beta_new, ulong ex
 	get_final_coeffs(xmin, coeffs);
 }
 
-void save_beta(string filename, float *beta, ulong feature_count)
+void save_beta(string filename, float *beta, feature_t feature_count)
 {
 	start_timer("saving beta");
 	FILE *file_rfeatures = fopen(filename.c_str(), "w");
@@ -924,7 +1053,7 @@ void save_beta(string filename, float *beta, ulong feature_count)
 	fprintf(file_rfeatures, "solver_type L1R_LR\n");
 	fprintf(file_rfeatures, "nr_class 2\n");
 	fprintf(file_rfeatures, "label 1 -1\n");
-	fprintf(file_rfeatures, "nr_feature %ld\n", feature_count - 1);
+	fprintf(file_rfeatures, "nr_feature %ld\n", (ulong)(feature_count - 1));
 	fprintf(file_rfeatures, "bias -1\n");
 	fprintf(file_rfeatures, "w\n");
 
@@ -985,12 +1114,12 @@ public:
 	double grad_norm_local;
 	double grad_norm;
 	double coeffs_norm;
-	ulong global_bad_coord;
+	feature_t global_bad_coord;
 	double alpha;
 	int back_search_count;
 };
 
-double delta_norm(float *v1, float *v2, ulong feature_count)
+double delta_norm(float *v1, float *v2, feature_t feature_count)
 {
 	double norm = 0.0;
 	
@@ -1045,7 +1174,7 @@ int main(int argc, char **argv)
 
 	po::variables_map vm;
 	po::store(po::parse_command_line(argc, argv, all_desc), vm);
-	po::notify(vm);    
+	po::notify(vm);  
 
 	if (vm.count("help")) {
 		cout << general_desc << "\n" << cluster_desc << "\n";
@@ -1087,24 +1216,26 @@ int main(int argc, char **argv)
 
 	g_cache_filename = cache_filename;
 
-	ulong max_feature_id = 0;
-	ulong max_example_id = 0;
+	feature_t max_feature_id = 0;
+	example_t max_example_id = 0;
 	ulong lines_count = 0;
-	ulong unique_features = 0;
+	feature_t unique_features = 0;
 
-	if (!file_exists(cache_filename.c_str())) {
-		create_cache(dataset_filename.c_str(), cache_filename.c_str(), &max_feature_id, &max_example_id, &lines_count, &unique_features);
-	}
-	else {
+//	if (!file_exists(cache_filename.c_str())) {
+		g_cache.Create(dataset_filename.c_str(), cache_filename.c_str(), &max_feature_id, &max_example_id, &lines_count, &unique_features);
+//	}
+/*	else {
 		start_timer("initial dataset processing");
 		FILE *file = fopen(cache_filename.c_str(), "r");
 
-		while (!feof(file)) {
-			ulong feature_id, example_id;
-			int y;
-			float weight, x; 
+		ulong feature_id, example_id;
+		int y;
+		float weight, x;
 
-			while (parse_line_cache(file, &feature_id, &example_id, &y, &weight, &x, NULL)) {
+		g_cache.Rewind();
+
+		while (g_cache.ReadVariable(&feature_id)) {
+			while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
 				if (feature_id > max_feature_id)
 					max_feature_id = feature_id;
 				if (example_id > max_example_id)
@@ -1116,9 +1247,13 @@ int main(int argc, char **argv)
 		fclose(file);
 		stop_timer("initial dataset processing");
 	}
+*/
+
+	float sum_coeffs[global.total];
+	memset(sum_coeffs, 0, sizeof(float) * global.total);
 	
-	printf("debug: max_feature_id %ld\n", max_feature_id);
-	printf("debug: max_example_id %ld\n", max_example_id);
+	printf("debug: max_feature_id %ld\n", (ulong)max_feature_id);
+	printf("debug: max_example_id %ld\n", (ulong)max_example_id);
 
 	if (distributed) {
 		if (vm["sync"].as<int>()) sync_nodes();
@@ -1129,13 +1264,13 @@ int main(int argc, char **argv)
 		stop_timer("sync dataset info");
 	}
 
-	ulong feature_count = max_feature_id + 1;
-	ulong example_count = max_example_id + 1;
+	feature_t feature_count = max_feature_id + 1;
+	example_t example_count = max_example_id + 1;
 
 	printf("lines count      = %ld\n", lines_count);
-	printf("unique features  = %ld\n", unique_features);
-	printf("feature count    = %ld\n", feature_count);
-	printf("example count    = %ld\n", example_count);
+	printf("unique features  = %ld\n", (ulong)unique_features);
+	printf("feature count    = %ld\n", (ulong)feature_count);
+	printf("example count    = %ld\n", (ulong)example_count);
 	printf("final regressor  = %s\n", !vm["final-regressor"].empty() ? vm["final-regressor"].as<string>().c_str() : "");
 	printf("combination type = %d\n", combine_type);
 	printf("iterations_max   = %d\n", iterations_max);
@@ -1159,70 +1294,12 @@ int main(int argc, char **argv)
 	float *betaTx = (float*)calloc(example_count, sizeof(float));
 	float *exp_betaTx = (float*)calloc(example_count, sizeof(float));
 	float *betaTx_delta = (float*)calloc(example_count, sizeof(float));
-	int *all_y = (int*)calloc(example_count, sizeof(float));
 	float *beta = (float*)calloc(feature_count, sizeof(float));
 	float *beta_new = (float*)calloc(feature_count, sizeof(float));
 	float *grad = (float*)calloc(feature_count, sizeof(float));
-	//fpos_t *beta_pos = (fpos_t*)calloc(feature_count, sizeof(float));
-	//char *active = (char*)calloc(feature_count, 1);
 
-	//memset(active, 1, feature_count);
-
-	//
-	// Read all_y
-	//
-	start_timer("initial dataset processing");
-	FILE *file = fopen(cache_filename.c_str(), "r");
-	ulong line_idx = 0;
-	ulong prev_feature_id = 0;
-	float sum_coeffs[global.total];
-	memset(sum_coeffs, 0, sizeof(float) * global.total);
-
-	while (!feof(file)) {
-		ulong feature_id, example_id;
-		int y;
-		float weight, x; 
-		fpos_t fpos;
-
-		while (parse_line_cache(file, &feature_id, &example_id, &y, &weight, &x, &fpos)) {
-			if (example_id > example_count)
-				printf("Error! example_id %ld > example_count %ld\n", example_id, example_count);
-
-			all_y[example_id] = y;
-
-			/*if ((feature_id != prev_feature_id) || (line_idx == 0)) {
-				beta_pos[feature_id] = fpos;
-				prev_feature_id = feature_id;
-			}*/	
-
-			line_idx++;
-		}
-	}
-
-	fclose(file);
-	stop_timer("initial dataset processing");
-	
-	//
-	// Synchronize all_y at nodes (some nodes may not have full list of the examples)
-	//
-	if (distributed) {
-		if (vm["sync"].as<int>()) sync_nodes();
-
-		start_timer("sync all_y");
-		float *all_y_float = (float*)calloc(example_count, sizeof(float));
-
-		for (int i = 0; i < example_count; i++)			
-			all_y_float[i] = all_y[i];
-
-		accumulate_vector(g_master_location, all_y_float, example_count);
-		printf("network time, sec %f \n", get_comm_time() * 1.0e-3);
-
-		for (int i = 0; i < example_count; i++)			
-			all_y[i] = (all_y_float[i] < 0 ? -1 : 1);
-
-		free(all_y_float);
-		stop_timer("sync all_y");
-	}
+	g_cache.InitY(example_count, feature_count, distributed, vm);
+	int *all_y = g_cache.GetY();
 
 	for (int i = 0; i < example_count; i++)
 		exp_betaTx[i] = 1.0;
@@ -1231,10 +1308,7 @@ int main(int argc, char **argv)
 	printf("loss %f\n\n", prev_loss);
 	/*double qloss = get_qloss(betaTx, betaTx_delta, beta, beta_new, example_count, feature_count, lambda_1, all_y);
 	printf("qloss %f\n", qloss);*/
-	ulong count = 0;
 	int cd_count = 0;
-	int feature_idx = 0;
-	file = fopen(cache_filename.c_str(), "r");
 	int active_features_iteration = 0;
 
 	IterStat iter_stat[iterations_max + 1];
@@ -1248,42 +1322,22 @@ int main(int argc, char **argv)
 		start_timer("iterations");
 		printf("Iteration %d\n", iter);
 		printf("--------------\n");
-		fpos_t feature_start_pos;
-		ulong prev_feature_id = 0;
+		feature_t feature_id = 0;
+		memset(grad, 0, feature_count * sizeof(float));
 
-		double sum_w_x_2 = 0.0;
-		double sum_w_q_x = 0.0;
+		g_cache.Rewind();
 
-		while (!feof(file)) {
+		while (g_cache.ReadVariable(&feature_id)) {
 
-			fpos_t tmp_file_pos;
-			memset(grad, 0, feature_count * sizeof(float));
-
-			ulong feature_id, example_id;
+			example_t example_id;
 			int y;
-			float weight, x; 
+			float weight, x;
 
-			while (parse_line_cache(file, &feature_id, &example_id, &y, &weight, &x, &tmp_file_pos)) {
+			double sum_w_x_2 = 0.0;
+			double sum_w_q_x = 0.0;
+			ulong count = 0;
 
-				if (feature_id != prev_feature_id) {
-
-					if (prev_feature_id != 0) {
-						update_feature(file, count, sum_w_q_x, sum_w_x_2, lambda_1, beta_max, &feature_start_pos, prev_feature_id, beta_new, betaTx_delta);
-
-						/*if (feature_idx % 32345 == 0) {
-							double qloss = get_qloss(betaTx, betaTx_delta, beta, beta_new, example_count, feature_count, lambda_1, all_y);
-							printf("feature_id = %ld qloss %f\n", prev_feature_id, qloss);
-							printf("feature_id = %ld beta = %f count = %ld\n", prev_feature_id, beta_new[prev_feature_id], count);
-						}
-						feature_idx++;*/
-					}
-
-			 		feature_start_pos = tmp_file_pos;
-
-					sum_w_x_2 = 0.0;
-					sum_w_q_x = 0.0;
-					count = 0;
-				}
+			while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
 
 				float example_betaTx = betaTx[example_id];
 
@@ -1309,19 +1363,18 @@ int main(int argc, char **argv)
 				sum_w_x_2 += w * x * x;
 				sum_w_q_x += w * q * x;
 
-				/*if (feature_id == 1797404) {
-					printf("y01 = % d p = %f w = %f q = %f x = %f ex_betaTx = %f betaTx_delta = %f beta_new = %f sum_w_x_2 = %f sum_w_q_x = %f\n", \
-						y01, p, w, q, x, example_betaTx, betaTx_delta[example_id], beta_new[feature_id], sum_w_x_2, sum_w_q_x);
-				}*/
-
 				grad[feature_id] += - y * x / (1.0 + exp_y_example_betaTx);
+				
+				/*if (example_id % 10 == 0)
+					cout << example_id << " " << x << " " << y << " " << weight << " " << sum_w_x_2 << " " << sum_w_q_x << endl;
+				*/
 			
 				count++;
-				prev_feature_id = feature_id;
 			}
+
+			update_feature(sum_w_q_x, sum_w_x_2, lambda_1, beta_max, feature_id, beta_new, betaTx_delta);
 		}
 
-		update_feature(file, count, sum_w_q_x, sum_w_x_2, lambda_1, beta_max, &feature_start_pos, prev_feature_id, beta_new, betaTx_delta);
 		stop_timer("iterations");
 
 		double min_loss;
@@ -1339,10 +1392,10 @@ int main(int argc, char **argv)
 		start_timer("debug: calc bad coordinates");
 		printf("\n");	
 		printf("Local ||beta - beta_new|| = %e\n", delta_norm(beta, beta_new, feature_count));
-		ulong bad_coord = get_bad_coordinates(beta_new, feature_count, beta_max);
+		feature_t bad_coord = get_bad_coordinates(beta_new, feature_count, beta_max);
 		if (distributed) {
-			printf("bad coordinates %ld\n", bad_coord);
-			iter_stat[iter].global_bad_coord = (ulong)(accumulate_scalar(g_master_location, bad_coord) + 0.5);
+			printf("bad coordinates %ld\n", (ulong)bad_coord);
+			iter_stat[iter].global_bad_coord = (feature_t)(accumulate_scalar(g_master_location, bad_coord) + 0.5);
 		}
 		stop_timer("debug: calc bad coordinates");
 
@@ -1358,7 +1411,7 @@ int main(int argc, char **argv)
 			g_example_count = example_count;
 			g_feature_count = feature_count;
 			g_lambda_1 = lambda_1;
-			g_all_y = all_y;
+			g_all_y = g_cache.GetY();
 
 			float coeffs[global.total];
 			combine_vectors(betaTx_delta, beta, beta_new, example_count, feature_count, prev_loss, combine_type, coeffs, vm["random-count"].as<int>());
@@ -1503,16 +1556,12 @@ int main(int argc, char **argv)
 			prev_loss = loss_new;
 		}
 
-		rewind(file);
-		
 		cout << "\n";
 
 		if (vm.count("save-per-iter") && !vm["final-regressor"].empty()) {
 			save_beta(vm["final-regressor"].as<string>() + to_string(iter), beta, feature_count);
 		}
 	}
-
-	fclose(file);
 
 	printf("\n");	
 	print_time_summary();
@@ -1523,18 +1572,14 @@ int main(int argc, char **argv)
 	printf("Iter\tLoss\tTime\tFullTime\tGradNorm\tGradNormLocal\tCoeffsNorm\tGlobalBadCoord\tAlpha\tBackSearch\n");
 	for (int i = 0; i <= iterations_max; ++i)
 		printf("%3d\t%.10e\t%d\t%d\t%.10e\t%.10e\t%f\t%ld\t%f\t%d\n", i, iter_stat[i].loss, iter_stat[i].time, iter_stat[i].full_time, iter_stat[i].grad_norm, iter_stat[i].grad_norm_local, \
-			 iter_stat[i].coeffs_norm, iter_stat[i].global_bad_coord, iter_stat[i].alpha, iter_stat[i].back_search_count);
+			 iter_stat[i].coeffs_norm, (ulong)iter_stat[i].global_bad_coord, iter_stat[i].alpha, iter_stat[i].back_search_count);
 
 	free(betaTx);
 	free(exp_betaTx);
 	free(betaTx_delta);
-	free(all_y);
 	free(beta);  
 	free(beta_new);
 	free(grad);
-
-	//free(beta_pos);
-	//free(active);
 
 	return 0;
 }
