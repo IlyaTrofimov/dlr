@@ -9,6 +9,7 @@
 #include<cfloat>
 #include<cstring>
 #include<vector>
+#include<algorithm>
 #include<sys/stat.h>
 #include<algorithm>
 #include "asa047.h"
@@ -31,6 +32,7 @@ using std::string;
 using std::map;
 using std::vector;
 using std::random_shuffle;
+using std::fill;
 
 time_t g_start_time;
 time_t g_time;
@@ -147,7 +149,12 @@ public:
 	void MoveToStartVariable();
 	void Rewind();
 	int* GetY();
+	feature_t GetFeatureId(int idx);
+	feature_t GetFeatureIndex(feature_t feature_count);
 	void InitY(example_t example_count, feature_t feature_count, bool distributed, const po::variables_map& vm);
+	void InitCache(feature_t feature_count);
+	void MoveToVar(feature_t feature_id);
+	feature_t GetCacheFeatureCount();
 	~Cache();
 
 private:
@@ -159,6 +166,10 @@ private:
 
 	vector<float> _y;
 	vector<float> _weight;	
+	vector<fpos_t> _start_var_pos;
+	vector<feature_t> _features;
+	vector<feature_t> _features_index;
+	feature_t _cache_feature_count;
 };
 
 Cache::~Cache()
@@ -170,6 +181,48 @@ Cache::~Cache()
 int* Cache::GetY()
 {
 	return _all_y;
+}
+
+feature_t Cache::GetCacheFeatureCount()
+{
+	return _cache_feature_count;
+}
+
+feature_t Cache::GetFeatureId(int idx) 
+{
+	return _features[idx];
+}
+
+feature_t Cache::GetFeatureIndex(feature_t feature_id) 
+{
+	return _features_index[feature_id];
+}
+
+void Cache::InitCache(feature_t feature_count)
+{
+	feature_t feature_id;
+	feature_t i = 0;
+
+	_start_var_pos.resize(feature_count);
+	_features.resize(feature_count);
+	_features_index.resize(feature_count);
+
+	Rewind();
+	
+	while(ReadVariable(&feature_id)) {
+		_features[i] = feature_id;
+		_features_index[feature_id] = i;
+		_start_var_pos[feature_id] = _start_feature_pos;
+		i++;
+
+		example_t example_id;
+		int y;
+		float weight, x;
+
+		while(ReadLine(&example_id, &x, &y, &weight)) {	}
+	}
+
+	_cache_feature_count = i;
 }
 
 void Cache::InitY(example_t example_count, feature_t feature_count, bool distributed, const po::variables_map& vm)
@@ -294,10 +347,16 @@ int Cache::ReadVariable(feature_t *feature_id)
 
 		fgetpos(_file, &_start_feature_pos);
 
-		if (!fread(feature_id, sizeof(feature_t), 1, _file))
+		if (!fread(feature_id, sizeof(feature_t), 1, _file)) {
+			cout << "return 0" << endl;
 			return 0;
+		}
 		_is_new_feature = false;
+		return 1;
 	}
+
+	if (feof(_file))
+		return 0;
 }
 
 void Cache::Rewind() 
@@ -307,10 +366,19 @@ void Cache::Rewind()
 	fgetpos(_file, &_start_feature_pos);
 }
 
+void Cache::MoveToVar(feature_t feature_id)
+{
+	fsetpos(_file, &_start_var_pos[feature_id]);
+	_is_new_feature = true;
+}
+
 int Cache::ReadLine(example_t *example_id, float *x, int *y, float *weight)
 {
 	if (_is_new_feature)
 		return 0;	
+
+	if (feof(_file))
+		return 0;
 
 	if (!fread(example_id, sizeof(example_t), 1, _file))
 		return 0;
@@ -1158,6 +1226,7 @@ int main(int argc, char **argv)
 		("beta-max", po::value<float>()->default_value(10.0), "maximum absolute beta[i]")
 		("random-count", po::value<int>()->default_value(2), "number of deltas taken randomly")
 		("no-back-search", "don't make back search")
+		("active", "use active features set")
         	;
 
 	po::options_description cluster_desc("Cluster options");
@@ -1299,17 +1368,22 @@ int main(int argc, char **argv)
 	float *grad = (float*)calloc(feature_count, sizeof(float));
 
 	g_cache.InitY(example_count, feature_count, distributed, vm);
+	g_cache.InitCache(feature_count);
+
 	int *all_y = g_cache.GetY();
 
 	for (int i = 0; i < example_count; i++)
 		exp_betaTx[i] = 1.0;
 
+	print_time();
 	double prev_loss = get_loss(0.0, betaTx, betaTx_delta, beta, beta_new, example_count, feature_count, lambda_1, all_y);
-	printf("loss %f\n\n", prev_loss);
-	/*double qloss = get_qloss(betaTx, betaTx_delta, beta, beta_new, example_count, feature_count, lambda_1, all_y);
-	printf("qloss %f\n", qloss);*/
+	printf("loss %f\n", prev_loss);
+	double prev_qloss = get_qloss(betaTx, betaTx_delta, beta, beta_new, example_count, feature_count, lambda_1, all_y);
+	printf("qloss %f\n", prev_qloss);
+	vector<char> active(feature_count, 1);
+	int active_feature_iter = 0;
+	int active_count = 0;
 	int cd_count = 0;
-	int active_features_iteration = 0;
 
 	IterStat iter_stat[iterations_max + 1];
 	memset(iter_stat, 0, sizeof(iter_stat));
@@ -1322,12 +1396,32 @@ int main(int argc, char **argv)
 		start_timer("iterations");
 		printf("Iteration %d\n", iter);
 		printf("--------------\n");
-		feature_t feature_id = 0;
+		printf("active %d\n", active_feature_iter);
+
+		feature_t processed_features = 0;
+		int lines_processed = 0;
 		memset(grad, 0, feature_count * sizeof(float));
+
+		if (!active_feature_iter) {
+			fill(active.begin(), active.end(), 1);
+			prev_qloss = get_qloss(betaTx, betaTx_delta, beta, beta_new, example_count, feature_count, lambda_1, all_y);
+		}
 
 		g_cache.Rewind();
 
-		while (g_cache.ReadVariable(&feature_id)) {
+		for (feature_t feature_idx = 0; feature_idx < g_cache.GetCacheFeatureCount(); ++feature_idx) {
+
+			feature_t feature_id = g_cache.GetFeatureId(feature_idx);
+
+			if (!active[feature_id]) {
+				continue;
+			}
+			else {
+				g_cache.MoveToVar(feature_id);
+				processed_features++;
+			}
+
+			g_cache.ReadVariable(&feature_id);
 
 			example_t example_id;
 			int y;
@@ -1335,7 +1429,6 @@ int main(int argc, char **argv)
 
 			double sum_w_x_2 = 0.0;
 			double sum_w_q_x = 0.0;
-			ulong count = 0;
 
 			while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
 
@@ -1365,11 +1458,7 @@ int main(int argc, char **argv)
 
 				grad[feature_id] += - y * x / (1.0 + exp_y_example_betaTx);
 				
-				/*if (example_id % 10 == 0)
-					cout << example_id << " " << x << " " << y << " " << weight << " " << sum_w_x_2 << " " << sum_w_q_x << endl;
-				*/
-			
-				count++;
+				lines_processed++;
 			}
 
 			update_feature(sum_w_q_x, sum_w_x_2, lambda_1, beta_max, feature_id, beta_new, betaTx_delta);
@@ -1388,6 +1477,9 @@ int main(int argc, char **argv)
 
 		//print_vector("beta", beta, feature_count);
 		//print_vector("beta_new", beta_new, feature_count);
+
+		printf("processed features total %d\n", processed_features);
+		printf("lines processed %d\n", lines_processed);
 
 		start_timer("debug: calc bad coordinates");
 		printf("\n");	
@@ -1492,21 +1584,53 @@ int main(int argc, char **argv)
 		// Check termination criteria
 		//
 		double loss_new = get_loss(best_alpha, betaTx, betaTx_delta, beta, beta_new, example_count, feature_count, lambda_1, all_y);
+		double qloss_new = get_qloss(betaTx, betaTx_delta, beta, beta_new, example_count, feature_count, lambda_1, all_y);
 		double relative_loss_diff = ((loss_new - prev_loss) / prev_loss);
-		printf("loss %e ||grad||_2 %e relative_loss_diff %e\n", loss_new, grad_norm, relative_loss_diff);
+		double rel_qloss_diff = ((qloss_new - prev_qloss) / prev_qloss);
+
+		printf("loss %e qloss %e ||grad||_2 %e rel_loss_diff %e rel_qloss_diff %e\n", loss_new, qloss_new, grad_norm, relative_loss_diff, rel_qloss_diff);
 		
 		int make_newton;
 		int cd_max = 1;
 		cd_count++;
+
+		if (!active_feature_iter && vm.count("active")) {
+			for (int i = 0; i < feature_count; ++i) {
+				if (fabs(beta_new[i]) < 1.0e-6) {
+					active[i] = 0;
+				}	
+			}
+
+			active_feature_iter = 1;
+			active_count = 0;
+		}
+
+		if (active_feature_iter)
+			active_count++;
+
+		if (active_count == 3) {
+			active_count = 0;
+			active_feature_iter = 0;
+		}
  
-		if (fabs(relative_loss_diff) < termination_eps) {
+		/*if (fabs(relative_loss_diff) < termination_eps) {
 			if (cd_count < cd_max) {
 				make_newton = 0;
 			}
 			else {
 				make_newton = 1;
+				active_feature_iter = 0;
 				cd_count = 0;
 			}
+		}
+		else {
+			make_newton = 1;
+			active_feature_iter = 0;
+			cd_count = 0;
+		}*/
+
+		if (cd_count < cd_max) {
+			make_newton = 0;
 		}
 		else {
 			make_newton = 1;
@@ -1555,6 +1679,7 @@ int main(int argc, char **argv)
 		if (make_newton) {
 			prev_loss = loss_new;
 		}
+		prev_qloss = qloss_new;
 
 		cout << "\n";
 
