@@ -1,3 +1,7 @@
+# This project
+dlr
+test_allreduce
+
 # Compiled Object files
 *.slo
 *.lo
