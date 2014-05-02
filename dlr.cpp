@@ -40,6 +40,7 @@ string g_master_location;
 map<string, int> g_timers;
 map<string, int> g_start_timers;
 
+
 void print_time()
 {
 	time_t timer;
