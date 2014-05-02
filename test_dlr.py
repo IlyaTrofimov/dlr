@@ -3,6 +3,7 @@ import os
 import sys
 from marina.base_metrics import get_metrics
 from multiprocessing import Process, Pipe
+import re
 
 def execute(cmd):
 	sys.stdout.write(cmd + '\n')
@@ -83,25 +84,52 @@ def get_models_metrics(dir_models, max_model, test_file):
 	metrics = ['MSE', 'NLL', 'LinCorr', 'auPRC', 'Alpha']
 
 	data = 'id test_LinCorr test_auPRC test_NLL test_Alpha features\n'
-	funcs = [None] * (max_model + 1)
-	parent_cons = [None] * (max_model + 1)
 	block_size = 10
 
 	all_test_metrics = []
 
-	for j in xrange(0, max_model / block_size + 1):
-		begin = j * block_size + 1
-		end = (j + 1) * block_size + 1	
+	files = [f for f in os.listdir(dir_models) if re.match(r'^model\.[0-9]+\.[0-9]+$', f)]
+	files.sort()
+	
+	max_model = len(files)
+	models = ['%s/%s' % (dir_models, f) for f in files]
+	print files
 
-		if end > max_model + 1:
-			end = max_model + 1
+	funcs = [None] * (max_model + 1)
+	parent_cons = [None] * (max_model + 1)
+
+	for j in xrange(0, max_model / block_size + 1):
+#	for j in xrange(0, max_model / block_size + 1):
+#		begin = j * block_size + 1
+#		end = (j + 1) * block_size + 1	
+
+		begin = j * block_size
+		end = min((j + 1) * block_size, max_model)
+
+		print begin, end, len(models)
+
+#		models = []
+
+#		for i in xrange(begin, end):
+			#model_file = '%s/model%d' % (dir_models, i)
+#			print files
+#			sys.exit()
+
+#			models = files
+
+#			if os.path.isfile(model_file):
+#				models.append(i)
 
 		for i in xrange(begin, end):
-			model_file = '%s/model%d' % (dir_models, i)
-			pred_file = '%s/tmp_pred%d' % (dir_models, i)
+			m = models[i]
+#			model_file = '%s/model%d' % (dir_models, i)
+			model_file = m
+#			pred_file = '%s/tmp_pred%d' % (dir_models, i)
+			pred_file = m + '.pred'
 
 			parent_cons[i], con = Pipe()
-			cmd = 'metrics = get_metrics_liblinear("%s", "%s", "%s", %s); features_count = get_features_count("%s")' % (test_file, model_file, pred_file, str(metrics), model_file)
+			cmd = 'metrics = get_metrics_liblinear("%s", "%s", "%s", %s); features_count = get_features_count("%s");' % (test_file, model_file, pred_file, str(metrics), model_file)
+			cmd += 'os.remove("%s"); os.remove("%s")' % (model_file, pred_file)
 			funcs[i] = AsyncFunc(cmd, con)
 			funcs[i].start()		
 
@@ -111,8 +139,10 @@ def get_models_metrics(dir_models, max_model, test_file):
 		for i in xrange(begin, end):
 			test_metrics, features_count = parent_cons[i].recv()
 
-			data += '%d %f %f %f %f %d\n' % \
-				(i, test_metrics['LinCorr'], test_metrics['auPRC'], test_metrics['NLL'], test_metrics['Alpha'], features_count)
+			idx = models[i].replace('model','')
+
+			data += '%s %f %f %f %f %d\n' % \
+				(idx, test_metrics['LinCorr'], test_metrics['auPRC'], test_metrics['NLL'], test_metrics['Alpha'], features_count)
 
 			all_test_metrics += [[i, test_metrics]]
 

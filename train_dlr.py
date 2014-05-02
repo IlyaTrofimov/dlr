@@ -12,6 +12,7 @@ from math import sqrt
 import re
 from copy import deepcopy
 from tempfile import NamedTemporaryFile
+from test_dlr_dist import local_dist_run
 
 from test_dlr import get_models_metrics
 
@@ -30,16 +31,24 @@ def execute(cmd):
 	print cmd
 	os.system(cmd)
 
-def create_reducer(jobcount, port, features, save_dataset = False):
+def create_reducer(jobcount, port, features, save_dataset = False, head = False):
 	''' Creates a text of mapper with given parameters '''
 
-	reducer = '''
+	if head:
+		reducer = '''
+more | head -n 1000 > train;
+'''
+	else:
+		reducer = '''
 more > train;
+'''
+	reducer += '''
 jobid=`id_client.py HOST PORT start`;
-#head -n 1000 train > head_train;
-./dlr -d train -f model FEATURES SERVER_PARAMS 1> log 2>&1;
+
+./dlr -d train -l label.tmp -f model FEATURES SERVER_PARAMS 1> log;
 node=`uname -n`;
-tar cfz models.tar.gz model*;
+touch model_empty;
+tar cfz models.tar.gz *model*;
 echo 0;
 ./encode_record.py $node log;
 echo 1;
@@ -62,7 +71,7 @@ id_client.py HOST PORT finish;
 	SERVER_PARAMS = '--server HOST --total JOBCOUNT --unique-id UNIQUE_ID --node $jobid'
 
 	reducer = reducer.replace('SERVER_PARAMS', SERVER_PARAMS)
-	reducer = reducer.replace('HOST', '141.8.172.125')
+	reducer = reducer.replace('HOST', '141.8.134.1')
 	reducer = reducer.replace('PORT', str(port))
 	reducer = reducer.replace('JOBCOUNT', str(jobcount))
 	reducer = reducer.replace('FEATURES', features)
@@ -199,7 +208,7 @@ def kill_children(pid):
 			execute('kill %d' % child_pid)
 
 
-def train_dlr(src_tables, jobcount, features, model, debug = 'debug', mapper_args = '', dump_dir = '.', save_dataset = False):
+def train_dlr(src_tables, label_table, jobcount, features, model, debug = 'debug', mapper_args = '', dump_dir = '.', save_dataset = False, head = False):
 
 	any_table_exists = False
 
@@ -219,7 +228,7 @@ def train_dlr(src_tables, jobcount, features, model, debug = 'debug', mapper_arg
 	
 	port = id_server_con.recv()
 
-	reducer = create_reducer(jobcount, port, features, save_dataset)
+	reducer = create_reducer(jobcount, port, features, save_dataset, head)
 
 	reducer_file = '%d.sh' % randint(0, 1000000)
 
@@ -232,18 +241,24 @@ def train_dlr(src_tables, jobcount, features, model, debug = 'debug', mapper_arg
 	print reducer
 	print
 
-	script = '''\
+	script = '''
 if [ "$(killall -0 spanning_tree 2>&1)" != "" ]; then
 	spanning_tree;
 fi;
- 
-mapreduce -reduce ./REDUCER -subkey -file ./dlr -file ./encode_record.py -file /tmp/REDUCER SRC_TABLES -dst DEBUG_TABLE -dst MODEL_TABLE -opt "OPTIONS" -jobcount JOBCOUNT EXT_ARGS;
+
+mapreduce -subkey -read LABEL_TABLE > label.tmp;
+mapreduce -reduce ./REDUCER -subkey -file ./dlr -file ./encode_record.py -file /tmp/REDUCER SRC_TABLES -file label.tmp -dst DEBUG_TABLE -dst MODEL_TABLE -opt "OPTIONS" -jobcount JOBCOUNT EXT_ARGS;
 
 rm *.log;
 rm *.model.tar.gz;
 mapreduce -read DEBUG_TABLE | ./decode_record_value.py DUMP_DIR log;
-mapreduce -read MODEL_TABLE | ./decode_record_value.py DUMP_DIR model.tar.gz;
+mapreduce -read MODEL_TABLE | ./decode_record_value.py DUMP_DIR model.tar.gz;'''
 
+	if save_dataset:
+		script += '''
+mapreduce -read TRAIN_TABLE | ./decode_record_value.py DUMP_DIR train.tar.gz;'''
+
+	script += '''
 rm /tmp/REDUCER;'''
 
 	model_tmp = '/tmp/%d' % randint(0, 1000000)
@@ -262,7 +277,9 @@ rm /tmp/REDUCER;'''
 	script = script.replace('SRC_TABLES', '-src ' + ' -src '.join(src_tables))
 	script = script.replace('MODEL_TABLE', model_table)
 	script = script.replace('DEBUG_TABLE', debug_table)
-	script = script.replace('OPTIONS', 'box=developers,tier=2,threadcount=1')
+	script = script.replace('TRAIN_TABLE', debug_table)
+	script = script.replace('LABEL_TABLE', label_table)
+	script = script.replace('OPTIONS', 'box=developers,threadcount=1')
 	script = script.replace('MODEL_TMP', model_tmp)
 	script = script.replace('MODEL_FILE', model)
 	script = script.replace('EXT_ARGS', mapper_args)
@@ -297,7 +314,7 @@ rm /tmp/REDUCER;'''
 
 		execute('rm %s;' % model_tmp)
 
-	# some mapper restarted
+	# some reducers restarted
 	else:
 		kill_children(vw_trainer.pid)
 		vw_trainer.terminate()
@@ -316,7 +333,7 @@ def get_iter_stat(dump_dir):
 		if item.endswith('.log'):
 			with open(os.path.join(dump_dir, item)) as log_file:
 				text = log_file.read()	
-				match = re.match('[\s\S]*(Iter\s*Loss[\s\S]*)', text)
+				match = re.match('[\s\S]*(Iter\s*Loss[\s\w]*\n[\s*[\d.+-e]*\n]*)', text)
 				return match.group(1)
 
 def sigma(v):
@@ -413,27 +430,27 @@ def join_metrics(iter_stat, test_metrics):
 	joined_lines.append(iter_stat_lines[1].strip(' '))
 
 	for i in xrange(1, len(test_metrics_lines) - 1):
-		joined_lines.append(iter_stat_lines[i + 1].strip(' ') + ' ' + test_metrics_lines[i].strip(' '))
+		if i + 1 < len(iter_stat_lines):
+			joined_lines.append(iter_stat_lines[i + 1].strip(' ') + ' ' + test_metrics_lines[i].strip(' '))
 
 	for j in xrange(len(joined_lines)):
 		joined_lines[j] = joined_lines[j].replace(' ', '\t')
 
 	return '\n'.join(joined_lines)
 
-def write_task_info(a_dump_dir, task, test_file):
+def write_task_description(a_dump_dir, task):
 	with open('%s/task' % a_dump_dir, 'w') as f:
 		print >>f, str(task)
 
-def create_reports(a_dump_dir, task, test_file):
+def create_reports(a_dump_dir, task):
 
 	iterations = int(task['params']['iterations'])
 	jobcount = int(task['jobcount'])
 	distributed = bool(jobcount > 1)
+	test_file = task['test_file']
 
-	if distributed:
-		str_all_metrics, all_metrics = get_models_metrics(a_dump_dir, iterations, test_file)
-	else:
-		str_all_metrics, all_metrics = get_models_metrics(a_dump_dir, iterations, test_file)
+	execute('cd %s; tar xfvz *.model.tar.gz' % a_dump_dir)
+	str_all_metrics, all_metrics = get_models_metrics(a_dump_dir, iterations, test_file)
 
 	with open('%s/test_metrics' % a_dump_dir, 'w') as f:
 		print >>f, str_all_metrics
@@ -456,7 +473,12 @@ def create_reports(a_dump_dir, task, test_file):
 
 def process_task(task):
 
+	if 'report_only' in task:
+		create_reports(task['report_only'], task)
+		sys.exit()
+
 	train_tables = task['train_tables']
+	label_table = task['label_table']
 	test_file = task['test_file']
 	iterations = int(task['params']['iterations'])
 	jobcount = int(task['jobcount'])
@@ -465,33 +487,96 @@ def process_task(task):
 	for feature, value in task['params'].iteritems():
 		features += '--%s %s ' % (feature, str(value))
 
-	distributed = bool(jobcount > 1)
-	a_dump_dir = None
+	if 'dump_dir' in task:
+		a_dump_dir = task['dump_dir']
+	else:
+		a_dump_dir = None
 
-	for i in xrange(100):	
-		a_dump_dir = './dump-%s-%d' % (datetime.datetime.now().strftime('%Y%m%d'), i)
+		for i in xrange(100):	
+			a_dump_dir = './dump-%s-%d' % (datetime.datetime.now().strftime('%Y%m%d'), i)
 
-		if not os.path.isdir(a_dump_dir):
-			os.makedirs(a_dump_dir)
-			break
+			if not os.path.isdir(a_dump_dir):
+				os.makedirs(a_dump_dir)
+				break
 
 	if a_dump_dir is None:
 		sys.exit()
 
-	write_task_info(a_dump_dir, task, test_file)
+	write_task_description(a_dump_dir, task)
+	train_ok = False
 
-	if distributed:
-		train_dlr(train_tables, jobcount, features, 'model', dump_dir = a_dump_dir, save_dataset = task.get('save_dataset', False))
-		execute('cd %s; tar xfvz *.model.tar.gz' % a_dump_dir)
+	if 'local-dist-test' in task:
+		local_dist_run(train_tables, label_table, test_file, jobcount, features, a_dump_dir)
+		train_ok = True
+
+	elif (jobcount > 1):   # distributed
+		for count in xrange(5):
+			print 'Attempt ', count
+			if train_dlr(train_tables, label_table, jobcount, features, 'model', dump_dir = a_dump_dir, save_dataset = task.get('save_dataset', False), \
+					 mapper_args = '-memlimit 1', head = 'head' in task):
+				train_ok = True
+				break
 	else:
 		execute('rm *.cache');
-		execute('mapreduce -subkey -read %s | ./dlr -d /dev/stdin %s -f %s/model 1> %s/local.log 2>&1' % (train_tables, features, a_dump_dir, a_dump_dir))
 
-	create_reports(a_dump_dir, task, test_file)
+		if 'local-dataset' in task:
+			execute('./dlr -d %s -l %s %s -f %s/model 1> %s/local.log 2>&1' % (train_tables, label_table, features, a_dump_dir, a_dump_dir))
+		else:
+			head = '| head -n 1000' if 'head' in task else ''
+				
+			execute('mapreduce -subkey -read %s > label.tmp' % (label_table))
+			execute('mapreduce -subkey -read %s %s | ./dlr -d /dev/stdin -l label.tmp %s -f %s/model 1> %s/local.log 2>&1' % (train_tables, head, features, a_dump_dir, a_dump_dir))
+			
+		train_ok = True
+
+	if train_ok:
+		create_reports(a_dump_dir, task)
 
 if __name__ == '__main__':
 
+	get_lambda_list = lambda x: ' --lambda-1 '.join(map(str, x))
+
 	tasks = []
+#
+#----------------------------------------------------
+#	"small test" dataset
+#----------------------------------------------------
+
+	base_task = {
+		'local-dist-test':	True,
+		'local-dataset':	True,
+		'train_tables':		'small_train_ro_0.1.ii2',
+		'label_table':		'small_train_ro_0.1.label',
+		'test_file':		'small_test_ro_0.1.svm',
+		'jobcount':		4,
+		'params': {
+			'iterations':		100,
+			'lambda-1':		16.0,
+			'termination':		1.0e-4,
+			'combine-type':		0,
+			'save-per-iter':	1,
+			'beta-max':		10,
+			},
+		'etalon_loss': 4774.1,
+		'save_dataset': False,
+		}
+
+	task = deepcopy(base_task)
+	task['params']['combine-type'] = 0
+	task['params']['find-bias'] = 1
+	task['params']['linear-search'] = 1
+	task['params']['last-iter-sum'] = 1.0
+
+#	tasks.append(task)
+
+#	task = deepcopy(base_task)
+#	task['params']['combine-type'] = 6;
+#	task['params']['find-bias'] = 1;
+#	task['params']['initial-shrinkage'] = 1;
+#	task['params']['increase-shrinkage'] = 1;
+#	task['params']['decrease-shrinkage'] = 1;
+#	tasks.append(task)
+
 #
 #----------------------------------------------------
 #	"yandex_ad2" dataset
@@ -502,78 +587,143 @@ if __name__ == '__main__':
 		'test_file':		'/mnt/raid/home/trofim/genkin/yandex_ad2.test.svm',
 		'jobcount':		16,
 		'params': {
-			'iterations':		20,
-			'lambda-1':		128.0,
+			'iterations':		32,
+			'lambda-1':		16.0,
 			'termination':		0.0,
-			'combine-type':		1,
+			'combine-type':		0,
 			'save-per-iter':	1,
-			'beta-max':		100,
+			'beta-max':		10,
 			},
-		'etalon_loss': 105958.76
+		'etalon_loss': 7.10e7,
+		'save_dataset': False,
 		}
 
-	for a in map(lambda x : pow(2, x), range(0, 9)):
-		task = deepcopy(base_task)
-		task['params']['lambda-1'] = a	
-		tasks.append(task)
+#	create_reports('./dump-20140113-2', task)
+#	sys.exit()
+
+	task = deepcopy(base_task)
+	task['params']['combine-type'] = 0;
+	task['params']['find-bias'] = 1;
+	task['params']['linear-search'] = 1;
+	task['params']['termination'] = 1.0e-3;
+	task['params']['iterations'] = 10;
+	task['params']['lambda-1'] = get_lambda_list([pow(2, x) for x in xrange(10, -1, -1)])
+#	tasks.append(task)
+
+#	task = deepcopy(base_task)
+#	task['params']['combine-type'] = 1;
+#	task['params']['find-bias'] = 1;
+#	tasks.append(task)
+
+#	for shrinkage in [128.0, 64.0, 32.0, 16.0]:
+#		task = deepcopy(base_task)
+#		task['params']['combine-type'] = 6;
+#		task['params']['initial-shrinkage'] = shrinkage;
+#		task['params']['find-bias'] = 1;
+#		tasks.append(task)
+
+#	task = deepcopy(base_task)
+#	task['params']['combine-type'] = 6;
+#	task['params']['initial-shrinkage'] = 64.0;
+#	task['params']['increase-shrinkage'] = 0;
+#	tasks.append(task)
+
+
 
 #
 #----------------------------------------------------
 #	"epsilon" dataset
 #----------------------------------------------------
 
-#	base_task = {
-#		'train_tables':		'users/trofim/genkin/epsilon-train.ii',
-#		'test_file':		'/mnt/raid/home/trofim/genkin/epsilon_normalized.t',
-#		'jobcount':		16,
-#		'params': {
-#			'iterations':		50,
-#			'lambda-1':		2.0,
-#			'termination':		0.0,
-#			'combine-type':		1,
-#			'save-per-iter':	1,
-#			'beta-max':		100,
-#			'random-count':		2
-#			},
-#		'etalon_loss': 105958.76,
-#		}
-#
-#	task = deepcopy(base_task)
-#	task['jobcount'] = 1
-#	tasks.append(task)
+	base_task = {
+		'train_tables':		'users/trofim/genkin/epsilon-train.ii2',
+		'label_table':		'users/trofim/genkin/epsilon-train.label',
+		'test_file':		'/mnt/raid/home/trofim/genkin/epsilon_normalized.t',
+		'jobcount':		16,
+#		'head':			True,
+		'params': {
+			'iterations':		10,
+			'lambda-1':		2.0,
+			'termination':		0.0,
+			'combine-type':		0,
+			'save-per-iter':	1,
+			'beta-max':		100,
+			},
+		'etalon_loss': 105958.76,
+		}
 
+	task = deepcopy(base_task)
+	task['params']['termination'] = 1.0e-3
+	task['params']['linear-search'] = 1;
+#	task['params']['lambda-1'] = get_lambda_list([40.0, 32.0, 16.0, 8.0, 4.0, 3.2, 1.6])
+
+	tasks.append(task)
 #
 #----------------------------------------------------
 #	"webspam" dataset
 #----------------------------------------------------
 #
-#	base_task = {
-#		'train_tables':		'users/trofim/genkin/webspam.train.ii',
-#		'test_file':		'/mnt/raid/home/trofim/dlr/webspam_wc_normalized_trigram.test',
-#		'jobcount':		16,
-#		'params': {
-#			'iterations':		200,
-#			'lambda-1':		1 / 64.0,
-#			'termination':		0.0,
-#			'combine-type':		0,
-#			'save-per-iter':	1,
-#			'beta-max':		100
-#			},
-#		'etalon_loss': 2005.81766840625
-#		}
+	base_task = {
+		'train_tables':		'users/trofim/genkin/webspam.train.ii',
+		'test_file':		'/mnt/raid/home/trofim/dlr/webspam_wc_normalized_trigram.test',
+		'jobcount':		16,
+		'params': {
+			'iterations':		200,
+			'lambda-1':		1 / 64.0,
+			'termination':		0.0,
+			'combine-type':		0,
+			'save-per-iter':	1,
+			'beta-max':		1.0e6,
+			},
+		'etalon_loss': 2005.81766840625
+		}
 
-#	for combine_type in [0, 1, 3]:
-#		task = deepcopy(base_task)
-#		task['params']['combine-type'] = combine_type
-#		tasks.append(task)
+	task = deepcopy(base_task)
+	task['params']['iterations'] = 5 
+	task['params']['termination'] = 1.0e-3
+	task['params']['linear-search'] = 1;
+	task['params']['last-iter-sum'] = 1;
+#	task['params']['lambda-1'] = get_lambda_list([pow(2, -x) for x in xrange(-2, 12)])
+	task['params']['lambda-1'] = 1.0
 
-#	task = deepcopy(base_task)
-#	task['jobcount'] = 1  	# local
-#	task['params']['iterations'] = 50 
 #	tasks.append(task)
 
 #	'train_tables':		'users/trofim/genkin/train_set.ii',
 #	'test_file':		'/mnt/raid/home/trofim/dlr/test_set1.normed.svm',
+
+#
+#----------------------------------------------------
+#	"dna" dataset
+#----------------------------------------------------
+
+	base_task = {
+		'train_tables':		'users/trofim/genkin/dna.train.ii2',
+		'test_file':		'/mnt/raid/home/trofim/genkin/dna/dna.test.svm',
+		'jobcount':		16,
+		'params': {
+			'iterations':		32,
+			'lambda-1':		64.0,
+			'termination':		1.0e-3,
+			'combine-type':		0,
+			'save-per-iter':	1,
+			'beta-max':		1.0e6,
+			'linear-search':	1,
+			},
+		'etalon_loss': 105958.76,
+#		'report_only': './dump-20140327-0',
+		}
+
+	task = deepcopy(base_task)
+	task['params']['termination'] = 1.0e-5;
+	task['params']['last-iter-sum'] = 1;
+	task['params']['lambda-1'] = get_lambda_list([pow(2, x) for x in xrange(14, -1, -1)])
+#	tasks.append(task)
+
+	task = deepcopy(base_task)
+	task['params']['termination'] = 1.0e-5;
+	task['params']['last-iter-sum'] = 1;
+	task['params']['lambda-1'] = get_lambda_list([pow(2, x) for x in xrange(10, -1, -1)])
+#	tasks.append(task)
 
 	for task in tasks:
 		process_task(task)
