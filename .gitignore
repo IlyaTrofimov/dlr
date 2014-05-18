@@ -1,6 +1,10 @@
 # This project
 dlr
 test_allreduce
+*.tmp
+*.pyc
+*.swp
+dump-*
 
 # Compiled Object files
 *.slo

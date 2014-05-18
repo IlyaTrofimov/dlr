@@ -12,8 +12,8 @@ from math import sqrt
 import re
 from copy import deepcopy
 from tempfile import NamedTemporaryFile
-from test_dlr_dist import local_dist_run
 
+from test_dlr_dist import local_dist_run
 from test_dlr import get_models_metrics
 
 '''
@@ -25,6 +25,7 @@ A wrapper for VW training on a MapReduce cluster.
 '''
 
 TEST = False
+SPANNING_TREE_SERVER = '141.8.134.1' 
 
 def execute(cmd):
 	''' Simple wrapper for bash scripts '''
@@ -71,40 +72,13 @@ id_client.py HOST PORT finish;
 	SERVER_PARAMS = '--server HOST --total JOBCOUNT --unique-id UNIQUE_ID --node $jobid'
 
 	reducer = reducer.replace('SERVER_PARAMS', SERVER_PARAMS)
-	reducer = reducer.replace('HOST', '141.8.134.1')
+	reducer = reducer.replace('HOST', SPANNING_TREE_SERVER)
 	reducer = reducer.replace('PORT', str(port))
 	reducer = reducer.replace('JOBCOUNT', str(jobcount))
 	reducer = reducer.replace('FEATURES', features)
 	reducer = reducer.replace('UNIQUE_ID', str(randint(0, 1000000)))
 
 	return reducer
-
-def check_models(file_name, jobcount):
-	''' Checks that models, downloaded from MR are correct: equal and their number equals jobcount'''
-
-	models = {}
-	new_model = ''
-	ok = True
-
-	file = open(file_name)
-	for line in file:
-		new_model = line.rstrip('\n').split('\t')[1]
-		part = int(new_model[0:3])
-
-		if (part in models):
-			print 'Error: found duplicate part'
-			ok = False
-			break
-		else:
-			models[part] = new_model
-
-	file.close()
-
-	if len(models) == 0:
-		print 'Error: model is empty'
-		ok = False
-
-	return ok
 
 class VWTrainer(Process):
 	''' Class is dedicated for asynchonous running mapreduce process with bash-script'''
@@ -301,18 +275,10 @@ rm /tmp/REDUCER;'''
 		print 'DLR DEBUG:'
 		print
 
-		if True or check_models(model_tmp, jobcount):
-			print '--------'
-			print 'MODEL OK'
-			print '--------'
-			return True
-		else:
-			print '-----------'
-			print 'MODEL ERROR'
-			print '-----------'
-			return False
-
-		execute('rm %s;' % model_tmp)
+		print '--------'
+		print 'MODEL OK'
+		print '--------'
+		return True
 
 	# some reducers restarted
 	else:
@@ -640,10 +606,9 @@ if __name__ == '__main__':
 		'label_table':		'users/trofim/genkin/epsilon-train.label',
 		'test_file':		'/mnt/raid/home/trofim/genkin/epsilon_normalized.t',
 		'jobcount':		16,
-#		'head':			True,
 		'params': {
-			'iterations':		10,
-			'lambda-1':		2.0,
+			'iterations':		32,
+#			'lambda-1':		2.0,
 			'termination':		0.0,
 			'combine-type':		0,
 			'save-per-iter':	1,
@@ -655,9 +620,11 @@ if __name__ == '__main__':
 	task = deepcopy(base_task)
 	task['params']['termination'] = 1.0e-3
 	task['params']['linear-search'] = 1;
+	task['params']['last-iter-sum'] = 1;
 #	task['params']['lambda-1'] = get_lambda_list([40.0, 32.0, 16.0, 8.0, 4.0, 3.2, 1.6])
+	task['params']['lambda-path'] = 20
 
-	tasks.append(task)
+#	tasks.append(task)
 #
 #----------------------------------------------------
 #	"webspam" dataset
@@ -698,6 +665,7 @@ if __name__ == '__main__':
 
 	base_task = {
 		'train_tables':		'users/trofim/genkin/dna.train.ii2',
+		'label_table':		'users/trofim/genkin/dna.train.label',
 		'test_file':		'/mnt/raid/home/trofim/genkin/dna/dna.test.svm',
 		'jobcount':		16,
 		'params': {
@@ -714,16 +682,16 @@ if __name__ == '__main__':
 		}
 
 	task = deepcopy(base_task)
-	task['params']['termination'] = 1.0e-5;
+	task['params']['termination'] = 1.0e-3;
 	task['params']['last-iter-sum'] = 1;
 	task['params']['lambda-1'] = get_lambda_list([pow(2, x) for x in xrange(14, -1, -1)])
-#	tasks.append(task)
+	tasks.append(task)
 
 	task = deepcopy(base_task)
-	task['params']['termination'] = 1.0e-5;
+	task['params']['termination'] = 1.0e-3;
 	task['params']['last-iter-sum'] = 1;
 	task['params']['lambda-1'] = get_lambda_list([pow(2, x) for x in xrange(10, -1, -1)])
-#	tasks.append(task)
+	tasks.append(task)
 
 	for task in tasks:
 		process_task(task)

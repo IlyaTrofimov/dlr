@@ -1548,6 +1548,45 @@ float find_bias(int steps_max, int *all_y, float lambda_1, example_t example_cou
 
 	return bias;
 }
+ 
+void get_feature_lambda(float *f_lambda)
+{
+	g_cache.Rewind();
+
+	for (feature_t feature_idx = 0; feature_idx < g_cache.GetCacheFeatureCount(); ++feature_idx) {
+
+		feature_t feature_id = g_cache.GetFeatureId(feature_idx);
+
+		g_cache.ReadVariable(&feature_id);
+
+		example_t example_id;
+		int y;
+		float weight, x;
+
+		double sum_w_x_2 = 0.0;
+		double sum_w_q_x = 0.0;
+
+		while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
+
+			float exp_example_betaTx = g_exp_betaTx[example_id];
+
+			float exp_y_example_betaTx = (y == 1 ? exp_example_betaTx : 1.0 / exp_example_betaTx); 
+			float p = exp_example_betaTx / (1.0 + exp_example_betaTx);
+
+			p = LIMIT(p, P_MIN, P_MAX);
+
+			float w = p * (1 - p);
+			int y01 = (y + 1) / 2;
+
+			float q = (y01 - p) / w - (g_betaTx_delta[example_id] - g_beta_new[feature_id] * x);
+
+			sum_w_x_2 += w * x * x;
+			sum_w_q_x += w * q * x;
+		}
+
+		f_lambda[feature_id] = sum_w_q_x;
+	}
+}
 
 void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, string cache_filename, float termination_eps)
 {
@@ -1577,10 +1616,13 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 	int cd_count = 0;
 
 	vector<char> active(g_feature_count, 1);
-	vector<float> feature_lambda(g_feature_count, 0.0);
 
 	float *subgrad = (float*)safe_calloc(g_feature_count, sizeof(float));
 	int iterations_done;
+
+	printf("\n");
+	printf("lambda_1 = %f\n", g_lambda_1);
+	printf("\n");
 
 	for (int iter = 1; iter <= iterations_max; iter++) {
 		
@@ -1645,7 +1687,8 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 				lines_processed++;
 			}
 		
-			vector<float> *f_lambda = ((iter == 1) ? &feature_lambda : NULL);
+			//vector<float> *f_lambda = ((iter == 1) ? &feature_lambda : NULL);
+			vector<float> *f_lambda = NULL;
 				
 			update_feature(sum_w_q_x, sum_w_x_2, beta_max, feature_id, shrinkage, shrinkage_max,
 					vm["beta-min"].as<float>(), vm["zero-max-shrinkage"].as<int>(), f_lambda);
@@ -1918,16 +1961,6 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 			iter_stat[i].coeffs_norm, (ulong)iter_stat[i].global_bad_coord, iter_stat[i].alpha, iter_stat[i].back_search_count);
 	}
 
-	//
-	// Write lamda for features
-	//
-	FILE *file_rfeatures = fopen("lambda_model", "w");
-
-	for (int i = 1; i < g_feature_count; i++) {
-		fprintf(file_rfeatures, "%d\t%e\n", i, feature_lambda[i]);
-	}
-
-	fclose(file_rfeatures);
 }
 
 int main(int argc, char **argv)
@@ -1944,6 +1977,7 @@ int main(int argc, char **argv)
         	("labels,l", po::value<string>(), "labels of the training set")
         	("final-regressor,f", po::value<string>(), "final weights")
 		("lambda-1", po::value<vector<float> >()->default_value(default_lambda, "1.0"), "L1 regularization, allowed multiple values")
+		("lambda-path", po::value<int>(), "L1 regularization, number of labmdas in regularization path")
 		("combine-type,c", po::value<int>()->default_value(1), "type of deltas combination during AllReduce: \n0 - sum, 1 - best, 2 - Nelder-Mead, 3 - discrete opt, 4 - random, 5 - smart sum, 6 - shrinked sum")
 		("termination", po::value<float>()->default_value(1.0e-4), "termination criteria")
 		("iterations", po::value<int>()->default_value(100), "maximum number of iterations")
@@ -1982,6 +2016,9 @@ int main(int argc, char **argv)
 		cout << general_desc << "\n" << cluster_desc << "\n";
 		return 0;
 	}
+
+//	printf("%d", (int)vm.count("lambda-path"));
+//	return 0;
 
 	string dataset_filename = vm["dataset"].as<string>();
 	vector<float> lambda_1 = vm["lambda-1"].as<vector<float> >();
@@ -2090,16 +2127,56 @@ int main(int argc, char **argv)
 
 	print_time();
 
+	//
+	// Calc feature lambda
+	// 
+	float *feature_lambda = (float*)safe_calloc(g_feature_count, sizeof(float));
+	get_feature_lambda(feature_lambda);
+	if (distributed) {
+		accumulate_vector(g_master_location, feature_lambda, g_feature_count);
+	}
+
+	float lambda_max = 0.0;
+	for (int i = 0; i < g_feature_count; ++i) {
+		if (abs(feature_lambda[i]) > lambda_max) {
+			lambda_max = abs(feature_lambda[i]);
+		}
+	}
+
+
+	if (vm.count("lambda-path")) {
+		lambda_1.resize(vm["lambda-path"].as<int>());
+
+		for (int i = 0; i < vm["lambda-path"].as<int>(); ++i) {
+			lambda_1[i] = lambda_max * pow(2, - i - 1);	
+		}
+	}
+
+	//
+	// Real work is done here
+	//
 	for (int i = 0; i < lambda_1.size(); ++i) {
 		g_lambda_1 = lambda_1[i];
 		optimize(iterations_max, i, vm, cache_filename, termination_eps);
 	}
+
+	//
+	// Write lambda for features
+	//
+	FILE *file_rfeatures = fopen("lambda_model", "w");
+
+	for (int i = 1; i < g_feature_count; i++) {
+		fprintf(file_rfeatures, "%d\t%e\n", i, feature_lambda[i]);
+	}
+
+	fclose(file_rfeatures);
 
 	//safe_free(g_betaTx);
 	safe_free(g_exp_betaTx);
 	safe_free(g_betaTx_delta);
 	safe_free(g_beta);  
 	safe_free(g_beta_new);
+	safe_free(feature_lambda);
 
 	return 0;
 }
