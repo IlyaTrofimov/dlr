@@ -34,5 +34,6 @@ if __name__ == '__main__':
 		line1 = file1.readline().strip()
 		line2 = file2.readline().strip()
 
+	print 'OK!'
 
 	

@@ -1588,6 +1588,51 @@ void get_feature_lambda(float *f_lambda)
 	}
 }
 
+void read_beta(const char *filename, float *g_beta, float* g_beta_new, float *g_exp_betaTx)
+{
+	//
+	// Read beta from file
+	//
+	FILE *file = fopen(filename, "r");
+
+	for (int i = 0; i < 6; ++i) {
+		char *tmp = fgets(g_buffer, sizeof(g_buffer), file);		
+	}
+
+	feature_t feature_id = 1;
+
+	while (fgets(g_buffer, sizeof(g_buffer), file)) {
+		g_beta[feature_id] = g_beta_new[feature_id] = atof(g_buffer);
+		feature_id++;
+	}
+
+	//
+	// Calculate exp(betaTx)
+	//
+	g_cache.Rewind();
+
+	for (feature_t feature_idx = 0; feature_idx < g_cache.GetCacheFeatureCount(); ++feature_idx) {
+
+		feature_t feature_id = g_cache.GetFeatureId(feature_idx);
+
+		g_cache.ReadVariable(&feature_id);
+
+		example_t example_id;
+		int y;
+		float weight, x;
+
+		double sum_beta_x = 0.0;
+
+		while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
+
+			sum_beta_x += g_beta[feature_id] * x;
+
+		}
+
+		g_exp_betaTx[example_id] = exp(sum_beta_x);
+	}
+}
+
 void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, string cache_filename, float termination_eps)
 {
 	float beta_max = vm["beta-max"].as<float>();
@@ -1975,6 +2020,7 @@ int main(int argc, char **argv)
         	("help,h", "produce help message")
         	("dataset,d", po::value<string>(), "training set in the inverted index form")
         	("labels,l", po::value<string>(), "labels of the training set")
+        	("initial-regressor,i", po::value<string>(), "initial weights")
         	("final-regressor,f", po::value<string>(), "final weights")
 		("lambda-1", po::value<vector<float> >()->default_value(default_lambda, "1.0"), "L1 regularization, allowed multiple values")
 		("lambda-path", po::value<int>(), "L1 regularization, number of labmdas in regularization path")
@@ -2114,15 +2160,20 @@ int main(int argc, char **argv)
 	// Find bias ?
 	//
 	float bias = 0.0;
-		
-	if (vm.count("find-bias")) {
-		bias = find_bias(5, g_all_y, lambda_1[0], g_example_count);
-		g_beta[1] = g_beta_new[1] = bias;
-	}
 
-	for (int i = 0; i < g_example_count; i++) {
-		//g_betaTx[i] = bias;
-		g_exp_betaTx[i] = exp(bias);
+	if (vm.count("initial-regressor")) {
+		read_beta(vm["initial-regressor"].as<string>().c_str(), g_beta, g_beta_new, g_exp_betaTx);	
+	}
+	else {		
+		if (vm.count("find-bias")) {
+			bias = find_bias(5, g_all_y, lambda_1[0], g_example_count);
+			g_beta[1] = g_beta_new[1] = bias;
+		}
+
+		for (int i = 0; i < g_example_count; i++) {
+			//g_betaTx[i] = bias;
+			g_exp_betaTx[i] = exp(bias);
+		}
 	}
 
 	print_time();
