@@ -8,7 +8,7 @@ def execute(cmd):
 	os.system(cmd)
 
 if __name__ == '__main__':
-	execute('./dlr -d small_train_ro_0.1.ii2 --iterations 10 --lambda-1 16 -f tmp_model --last-iter-sum --linear-search 1 -l small_train_ro_0.1.label')
+	execute('./dlr -d small_train_ro_0.1.ii2 -i ethalon_model --iterations 10 --lambda-1 16 -f tmp_model --last-iter-sum --linear-search 1 -l small_train_ro_0.1.label')
 
 	file1 = open('tmp_model', 'r')
 	file2 = open('ethalon_model', 'r')

@@ -33,7 +33,7 @@ def execute(cmd):
 	os.system(cmd)
 
 def create_reducer(jobcount, port, features, save_dataset = False, head = False, initial = None):
-	''' Creates a text of mapper with given parameters '''
+	''' Creates a text of reducer with given parameters '''
 
 	if head:
 		reducer = '''
@@ -43,6 +43,11 @@ more | head -n 1000 > train;
 		reducer = '''
 more > train;
 '''
+	if initial:
+		reducer += '''
+mv %s initial;
+''' % os.path.split(initial)[1]
+
 	reducer += '''
 gunzip -f label.tmp.gz;
 jobid=`id_client.py HOST PORT start`;
@@ -78,7 +83,7 @@ id_client.py HOST PORT finish;
 	reducer = reducer.replace('FEATURES', features)
 	reducer = reducer.replace('UNIQUE_ID', str(randint(0, 1000000)))
 	if initial:
-		reducer = reducer.replace('INITIAL', '-i %s' % os.path.split(initial)[1])
+		reducer = reducer.replace('INITIAL', '-i initial')
 
 	return reducer
 
@@ -135,8 +140,9 @@ class IDServer(Process):
 
 			if start_count > self.__jobcount:
 				print 'Error: start_count > jobcount'
-				status = False
-				break
+				print datetime.datetime.now()
+#				status = False
+#				break
 
 			if finish_count == self.__jobcount:
 				status = True
@@ -259,7 +265,9 @@ rm /tmp/REDUCER;'''
 	script = script.replace('DEBUG_TABLE', debug_table)
 	script = script.replace('TRAIN_TABLE', debug_table)
 	script = script.replace('LABEL_TABLE', label_table)
-	script = script.replace('OPTIONS', 'threadcount=1')
+#	script = script.replace('OPTIONS', 'threadcount=1')
+	script = script.replace('OPTIONS', '')
+
 	script = script.replace('MODEL_TMP', model_tmp)
 	script = script.replace('MODEL_FILE', model)
 	script = script.replace('EXT_ARGS', mapper_args)
@@ -485,7 +493,7 @@ def process_task(task):
 		for count in xrange(5):
 			print 'Attempt ', count
 			if train_dlr(train_tables, label_table, jobcount, features, 'model', dump_dir = a_dump_dir, save_dataset = task.get('save_dataset', False), \
-					 mapper_args = '-memlimit 1', head = 'head' in task, initial = task.get('initial-regressor', None)):
+					 mapper_args = '', head = 'head' in task, initial = task.get('initial-regressor', None)):
 				train_ok = True
 				break
 	else:
@@ -556,9 +564,11 @@ if __name__ == '__main__':
 
 	base_task = {
 		'train_tables':		'users/trofim/genkin/yandex_ad2.train.ii2',
+#		'train_tables':		'users/trofim/genkin/yandex_ad2.train.subsample.ii2',
 		'label_table':		'users/trofim/genkin/yandex_ad2.train.label',
 		'test_file':		'/mnt/raid/home/trofim/genkin/yandex_ad2.test.svm',
 		'jobcount':		16,
+#		'head':			1,
 		'params': {
 			'iterations':		32,
 			'lambda-1':		16.0,
@@ -569,6 +579,7 @@ if __name__ == '__main__':
 			},
 		'etalon_loss': 7.10e7,
 		'save_dataset': False,
+#		'report_only':			'./dump-20140531-0',
 		}
 
 	task = deepcopy(base_task)
@@ -578,8 +589,9 @@ if __name__ == '__main__':
 	task['params']['last-iter-sum'] = 1;
 	task['params']['termination'] = 1.0e-3;
 #	task['params']['lambda-path'] = 10
-	task['params']['lambda-1'] = get_lambda_list([22229.60547, 11114.80273, 5557.401367, 2778.700684, 1389.350342, 694.6751709, 347.3375855, 173.6687927, 86.83439636, 43.41719818])
-	task['initial-regressor'] = '/mnt/raid/home/trofim/dlr/dump-20140527-0/model.009.002'
+#	task['params']['lambda-1'] = get_lambda_list([22229.60547, 11114.80273, 5557.401367, 2778.700684, 1389.350342, 694.6751709, 347.3375855, 173.6687927, 86.83439636, 43.41719818])
+	task['params']['lambda-1'] = 5557.401367
+	task['initial-regressor'] = '/mnt/raid/home/trofim/dlr/dump-20140531-0/model.001.004'
 #	task['params']['iterations'] = 10;
 #	task['params']['lambda-1'] = get_lambda_list([pow(2, x) for x in xrange(10, -1, -1)])
 	tasks.append(task)

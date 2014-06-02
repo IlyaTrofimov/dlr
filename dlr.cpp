@@ -44,7 +44,7 @@ using std::to_string;
 #define MAX_betaTx 100.0
 #define P_MIN 1.0e-6
 #define P_MAX (1.0 - 1.0e-6)
-#define BACK_SEARCH_ARMIJO_MAX 100
+#define BACK_SEARCH_ARMIJO_MAX 10
 
 //
 // Global variables 
@@ -1588,8 +1588,10 @@ void get_feature_lambda(float *f_lambda)
 	}
 }
 
-void read_beta(const char *filename, float *g_beta, float* g_beta_new, float *g_exp_betaTx)
+void read_beta(bool distributed, const char *filename, float *g_beta, float* g_beta_new, float *g_exp_betaTx)
 {
+	float *betaTx = (float*)safe_calloc(g_example_count, sizeof(float));
+
 	//
 	// Read beta from file
 	//
@@ -1606,6 +1608,8 @@ void read_beta(const char *filename, float *g_beta, float* g_beta_new, float *g_
 		feature_id++;
 	}
 
+	fclose(file);
+
 	//
 	// Calculate exp(betaTx)
 	//
@@ -1621,16 +1625,20 @@ void read_beta(const char *filename, float *g_beta, float* g_beta_new, float *g_
 		int y;
 		float weight, x;
 
-		double sum_beta_x = 0.0;
-
 		while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
-
-			sum_beta_x += g_beta[feature_id] * x;
-
+			betaTx[example_id] += g_beta[feature_id] * x;
 		}
-
-		g_exp_betaTx[example_id] = exp(sum_beta_x);
 	}
+
+	if (distributed) {
+		accumulate_vector(g_master_location, betaTx, g_example_count);
+	}
+
+	for (example_t i = 0; i < g_example_count; ++i) {
+		g_exp_betaTx[i] = exp(betaTx[i]);
+	}
+
+	safe_free(betaTx);
 }
 
 void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, string cache_filename, float termination_eps)
@@ -1654,7 +1662,8 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 	memset(iter_stat, 0, sizeof(iter_stat));
 	iter_stat[0].loss = prev_loss;
 	iter_stat[0].time = 0;
-	iter_stat[0].subgrad_norm_local = get_grad_norm_exact(cache_filename.c_str());
+//	iter_stat[0].subgrad_norm_local = get_grad_norm_exact(cache_filename.c_str());
+	iter_stat[0].subgrad_norm_local = 0.0;
 
 	int active_feature_iter = 0;
 	int active_count = 0;
@@ -2137,6 +2146,9 @@ int main(int argc, char **argv)
 		printf("unique id = %ld\n", global.unique_id);
 	}
 
+	if (vm.count("initial-regressor"))
+		printf("using initial regressor %s\n", vm["initial-regressor"].as<string>().c_str());
+
 	printf("\n");
 	printf("\n");
 
@@ -2156,15 +2168,15 @@ int main(int argc, char **argv)
 
 	printf("avg y = %f\n", avg_y / g_example_count);
 
-	//
-	// Find bias ?
-	//
-	float bias = 0.0;
-
 	if (vm.count("initial-regressor")) {
-		read_beta(vm["initial-regressor"].as<string>().c_str(), g_beta, g_beta_new, g_exp_betaTx);	
+		read_beta(distributed, vm["initial-regressor"].as<string>().c_str(), g_beta, g_beta_new, g_exp_betaTx);	
 	}
 	else {		
+		//
+		// Find bias ?
+		//
+		float bias = 0.0;
+
 		if (vm.count("find-bias")) {
 			bias = find_bias(5, g_all_y, lambda_1[0], g_example_count);
 			g_beta[1] = g_beta_new[1] = bias;
@@ -2182,20 +2194,21 @@ int main(int argc, char **argv)
 	// Calc feature lambda
 	// 
 	float *feature_lambda = (float*)safe_calloc(g_feature_count, sizeof(float));
-	get_feature_lambda(feature_lambda);
-	if (distributed) {
-		accumulate_vector(g_master_location, feature_lambda, g_feature_count);
-	}
-
-	float lambda_max = 0.0;
-	for (int i = 0; i < g_feature_count; ++i) {
-		if (abs(feature_lambda[i]) > lambda_max) {
-			lambda_max = abs(feature_lambda[i]);
-		}
-	}
-
 
 	if (vm.count("lambda-path")) {
+
+		get_feature_lambda(feature_lambda);
+		if (distributed) {
+			accumulate_vector(g_master_location, feature_lambda, g_feature_count);
+		}
+
+		float lambda_max = 0.0;
+		for (int i = 0; i < g_feature_count; ++i) {
+			if (abs(feature_lambda[i]) > lambda_max) {
+				lambda_max = abs(feature_lambda[i]);
+			}
+		}
+
 		lambda_1.resize(vm["lambda-path"].as<int>());
 
 		for (int i = 0; i < vm["lambda-path"].as<int>(); ++i) {
