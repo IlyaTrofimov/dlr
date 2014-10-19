@@ -37,7 +37,7 @@ using std::to_string;
 
 #define SGN(x) (((x) > 0)  - ((x) < 0))
 #define SQUARE(x) ((x) * (x))
-#define LIMIT(x, min, max) ( (x) < min ? min : ( (x) > max ? max : (x))) 
+#define LIMIT(x, min, max) ( (x) < min ? min : ((x) > max ? max : (x))) 
 
 #define NU 1.e-6
 #define SIGMA 0.01
@@ -50,7 +50,7 @@ using std::to_string;
 // Global variables 
 //
 //float *g_betaTx;
-float *g_exp_betaTx;
+double *g_exp_betaTx;
 
 float *g_betaTx_delta;
 float *g_beta;
@@ -506,6 +506,15 @@ void Cache::MoveToVar(feature_t feature_id)
 
 int Cache::ReadLine(example_t *example_id, float *x, int *y, float *weight)
 {
+	example_t tmp_example_id;
+	int tmp_y;
+	float tmp_x, tmp_weight;
+
+	if (!example_id) example_id = &tmp_example_id;
+	if (!x) x = &tmp_x;
+	if (!y) y = &tmp_y;
+	if (!weight) weight = &tmp_weight;
+
 	if (_is_new_feature)
 		return 0;	
 
@@ -551,8 +560,9 @@ double get_qloss()
 		qloss += g_lambda_1 * fabs(g_beta_new[i]);
 	
 	for (int i = 0; i < g_example_count; i++) {
-		float exp_example_betaTx = g_exp_betaTx[i];
-		float p = exp_example_betaTx / (1.0 + exp_example_betaTx);
+		double exp_example_betaTx = g_exp_betaTx[i];
+		double p = exp_example_betaTx / (1.0 + exp_example_betaTx);
+
 		if (p < 1.0e-6)
 			p = 1.0e-6;
 		if (p > 0.999999)
@@ -653,6 +663,26 @@ double get_grad_norm_exact(const char *cache_filename)
 	return subgrad_norm;
 }
 
+double get_logistic_loss_admm(int *all_y, float *betaTx, float *beta)
+{
+	double loss = 0.0;
+
+	for (int i = 0; i < g_feature_count; i++) {
+		loss += g_lambda_1 * fabs(beta[i]);
+	}
+
+	loss = accumulate_scalar(g_master_location, loss);
+
+	for (int i = 0; i < g_example_count; i++) {
+	
+		float log_odds = all_y[i] * betaTx[i];
+		loss += log(1.0 + exp(-log_odds));
+	}
+
+	return loss;
+}
+
+
 double get_loss(float alpha, float *reg_value)
 {
 	double loss = 0.0;
@@ -669,7 +699,7 @@ double get_loss(float alpha, float *reg_value)
 //		float log_odds = g_all_y[i] * (g_betaTx[i] + alpha * g_betaTx_delta[i]);
 //		loss += (log_odds < -100 ? log_odds : log(1.0 + exp(-log_odds)));
 
-		float exp_log_odds = (g_all_y[i] == -1 ? g_exp_betaTx[i] : 1.0 / g_exp_betaTx[i]);
+		double exp_log_odds = (g_all_y[i] == -1 ? g_exp_betaTx[i] : 1.0 / g_exp_betaTx[i]);
 		exp_log_odds *= exp(-g_all_y[i] * alpha * g_betaTx_delta[i]);
 
 		loss += log(1.0 + exp_log_odds);
@@ -760,17 +790,18 @@ void golden_section_search(double (*f)(float x), int count_max, float a0, float 
 void update_feature(float sum_w_q_x, float sum_w_x_2, float beta_max, feature_t feature_id, float shrinkage, float shrinkage_max, float beta_min, bool zero_max_shrinkage, vector<float> *feature_lambda)
 {
 	float beta_after_cd = 0.0;
+	float beta = g_beta_new[feature_id];
 
-	if (zero_max_shrinkage && (g_beta_new[feature_id] == 0.0))
+	if (zero_max_shrinkage && beta == 0.0)
 		shrinkage = shrinkage_max;
 
 	float A = sum_w_x_2 * shrinkage;
-	float B = sum_w_q_x + (shrinkage - 1.0 + NU) * sum_w_x_2 * g_beta_new[feature_id];
+	float B = sum_w_q_x + (shrinkage - 1.0 + NU) * sum_w_x_2 * beta;
 
 	if (feature_lambda)
 		feature_lambda->at(feature_id) = B;
 		
-	if (sum_w_x_2 != 0.0)
+	if (A != 0.0)
 		beta_after_cd = soft_threshold(B, g_lambda_1) / A;
 	else
 		beta_after_cd = 0.0;
@@ -780,19 +811,33 @@ void update_feature(float sum_w_q_x, float sum_w_x_2, float beta_max, feature_t 
 		
 	float beta_step_max = 10.0;
 
-	if (fabs(beta_after_cd - g_beta_new[feature_id]) > beta_step_max)
-		if (beta_after_cd > g_beta_new[feature_id])
-			beta_after_cd = g_beta_new[feature_id] + beta_step_max;
+	if (fabs(beta_after_cd - beta) > beta_step_max)
+		if (beta_after_cd > beta)
+			beta_after_cd = beta + beta_step_max;
 		else
-			beta_after_cd = g_beta_new[feature_id] - beta_step_max;
+			beta_after_cd = beta - beta_step_max;
 
 	if (fabs(beta_after_cd) < beta_min)
 		beta_after_cd = 0.0;
 
 	g_cache.MoveToStartVariable();
-	update_betaTx(beta_after_cd - g_beta_new[feature_id]);
+	update_betaTx(beta_after_cd - beta);
 
 	g_beta_new[feature_id] = beta_after_cd;
+}
+
+void update_feature_admm(float delta_beta, float *Aixik)
+{
+	feature_t feature_id;
+	example_t example_id;
+	float x;
+	
+	g_cache.MoveToStartVariable();
+	g_cache.ReadVariable(&feature_id); 
+
+	while(g_cache.ReadLine(&example_id, &x, NULL, NULL)) {
+		Aixik[example_id] += delta_beta * x;
+	}
 }
 
 feature_t get_bad_coordinates(float beta_max)
@@ -835,7 +880,8 @@ double get_combined_loss(double alpha[3]) {
 	}
 
 	for (int i = 0; i < g_example_count; i++) {
-		float logit = log(g_exp_betaTx[i]);
+		double logit = log(g_exp_betaTx[i]);
+
 		for (int k = 0; k < g_n; k++) 
 			logit += alpha[k] * g_betaTx_delta_c[k][i];
 
@@ -1049,6 +1095,40 @@ void print_vector(const char* name, float *v, int n)
 	printf("\n");
 }
 
+void print_vector(const char* name, int *v, int n)
+{
+	printf("%s:\n", name);
+
+	for (int i = 0; i < n; i++)
+		if (fabs(v[i]) > 1.0e-6)
+			printf("%d: %d\n", i, v[i]);
+
+	printf("\n");
+}
+
+
+void print_vector_line(const char* name, float *v, int n)
+{
+	printf("%s:", name);
+
+	for (int i = 0; i < n; i++)
+		printf(" %5.2f", v[i]);
+
+	printf("\n");
+}
+
+void print_vector_line(const char* name, int *v, int n)
+{
+	printf("%s:", name);
+
+	for (int i = 0; i < n; i++)
+		printf(" %5d", v[i]);
+
+	printf("\n");
+}
+
+
+
 void back_search(double zero_alpha_loss, float *best_alpha, double *min_loss, int *count, double *sum_loss)
 {
 	if (count) *count = 0;
@@ -1183,6 +1263,38 @@ float square_norm(float *v, int count)
 
 	return sqrt(sum);
 }
+
+float square_norm(int *v, int count)
+{
+	float sum = 0.0;
+
+	for (int i = 0; i < count; ++i) 
+		sum += v[i] * v[i];
+
+	return sqrt(sum);
+}
+
+
+float sum(float *v, int count)
+{
+	float sum = 0.0;
+
+	for (int i = 0; i < count; ++i) 
+		sum += v[i];
+
+	return sum;
+}
+
+float L1_norm(float *v, int count)
+{
+	float sum = 0.0;
+
+	for (int i = 0; i < count; ++i) 
+		sum += fabs(v[i]);
+
+	return sum;
+}
+
 
 void combine_vectors(double loss, int type, float coeffs[], int random_count)
 {
@@ -1409,7 +1521,7 @@ void combine_vectors(double loss, int type, float coeffs[], int random_count)
 	get_final_coeffs(xmin, coeffs);
 }
 
-void save_beta(string filename)
+void save_beta(string filename, float *v)
 {
 	start_timer("saving beta");
 	FILE *file_rfeatures = fopen(filename.c_str(), "w");
@@ -1424,16 +1536,20 @@ void save_beta(string filename)
 	float tolerance = 0.0; // 1.0e-6
 
 	for (int i = 1; i < g_feature_count; i++) {
-		if (fabs(g_beta[i]) <= tolerance) {
-			fprintf(file_rfeatures, "0\n", g_beta[i]);	
+		if (fabs(v[i]) <= tolerance) {
+			fprintf(file_rfeatures, "0\n", v[i]);	
 		}
 		else {
-			fprintf(file_rfeatures, "%f\n", g_beta[i]);	
+			fprintf(file_rfeatures, "%f\n", v[i]);	
 		}
 	}
 
 	fclose(file_rfeatures);
 	stop_timer("saving beta");
+}
+
+void save_beta(string filename) {
+	save_beta(filename, g_beta);	
 }
 
 void print_time_summary()
@@ -1496,6 +1612,19 @@ double delta_norm(float *v1, float *v2, feature_t feature_count)
 	}
 
 	return norm;
+}
+
+double solve_one_dim_log_reg(double x, double a, double c, int steps_max = 10) 
+{
+	for (int i = 0; i < steps_max; ++i) {
+		double exp_x = exp(x);
+		double der1 = - 1.0 / (1.0 + exp_x) + a * (x - c);
+		double der2 = exp_x / (SQUARE(1 + exp_x)) + a;
+
+		x = x - der1 / der2;
+	}
+
+	return x;
 }
 
 float newton_step(float bias, int *all_y, float lambda_1, example_t example_count)
@@ -1568,10 +1697,10 @@ void get_feature_lambda(float *f_lambda)
 
 		while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
 
-			float exp_example_betaTx = g_exp_betaTx[example_id];
+			double exp_example_betaTx = g_exp_betaTx[example_id];
 
-			float exp_y_example_betaTx = (y == 1 ? exp_example_betaTx : 1.0 / exp_example_betaTx); 
-			float p = exp_example_betaTx / (1.0 + exp_example_betaTx);
+			double exp_y_example_betaTx = (y == 1 ? exp_example_betaTx : 1.0 / exp_example_betaTx); 
+			double p = exp_example_betaTx / (1.0 + exp_example_betaTx);
 
 			p = LIMIT(p, P_MIN, P_MAX);
 
@@ -1588,7 +1717,7 @@ void get_feature_lambda(float *f_lambda)
 	}
 }
 
-void read_beta(bool distributed, const char *filename, float *g_beta, float* g_beta_new, float *g_exp_betaTx)
+void read_beta(bool distributed, const char *filename, float *g_beta, float* g_beta_new, double *g_exp_betaTx)
 {
 	float *betaTx = (float*)safe_calloc(g_example_count, sizeof(float));
 
@@ -1641,6 +1770,23 @@ void read_beta(bool distributed, const char *filename, float *g_beta, float* g_b
 	safe_free(betaTx);
 }
 
+void print_iter_stat(IterStat iter_stat[], int iterations_done)
+{
+
+	//
+	// Print iter-wise stat
+	//
+	printf("Iter\tLoss\tRelLossDiff\tIdealRelLossDiff\tRelSumErr\tTime\tFullTime\tSubGradNorm\tSubGradNormLocal\tCoeffsNorm\tGlobalBadCoord\tAlpha\tBackSearch\n");
+
+	for (int i = 0; i <= iterations_done; ++i) {
+		printf("%3d\t%.10e\t% .10e\t% .10e\t% .10e\t%d\t%d\t%.10e\t%.10e\t%f\t%ld\t%f\t%d\n",
+			i, iter_stat[i].loss, iter_stat[i].rel_loss_diff, iter_stat[i].ideal_rel_loss_diff, iter_stat[i].rel_sum_err, 
+			iter_stat[i].time, iter_stat[i].full_time, iter_stat[i].subgrad_norm, iter_stat[i].subgrad_norm_local, \
+			iter_stat[i].coeffs_norm, (ulong)iter_stat[i].global_bad_coord, iter_stat[i].alpha, iter_stat[i].back_search_count);
+	}
+
+}
+
 void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, string cache_filename, float termination_eps)
 {
 	float beta_max = vm["beta-max"].as<float>();
@@ -1685,6 +1831,27 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 		printf("--------------\n");
 		printf("active %d\n", active_feature_iter);
 
+		/* */
+		float max_beta = g_beta[0], min_beta = g_beta[0];
+
+		for (feature_t i = 0; i < g_feature_count; ++i) {
+			if (g_beta[i] > max_beta) max_beta = g_beta[i];
+			if (g_beta[i] < min_beta) min_beta = g_beta[i];
+		}
+		cout << "min_beta = " << min_beta << " max_beta = " << max_beta << endl;
+
+		double max_exp_betaTx = g_exp_betaTx[0], min_exp_betaTx = g_exp_betaTx[0];
+
+		/* */
+
+		for (example_t i = 0; i < g_example_count; ++i) {
+			if (g_exp_betaTx[i] > max_exp_betaTx) max_exp_betaTx = g_exp_betaTx[i];
+			if (g_exp_betaTx[i] < min_exp_betaTx) min_exp_betaTx = g_exp_betaTx[i];
+		}
+
+		cout << "min_exp_betaTx = " << min_exp_betaTx << " max_exp_betaTx = " << max_exp_betaTx << endl;
+		/* */
+
 		feature_t processed_features = 0;
 		int lines_processed = 0;
 		memset(subgrad, 0, g_feature_count * sizeof(float));
@@ -1719,10 +1886,10 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 
 			while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
 
-				float exp_example_betaTx = g_exp_betaTx[example_id];
+				double exp_example_betaTx = g_exp_betaTx[example_id];
 
-				float exp_y_example_betaTx = (y == 1 ? exp_example_betaTx : 1.0 / exp_example_betaTx); 
-				float p = exp_example_betaTx / (1.0 + exp_example_betaTx);
+				double exp_y_example_betaTx = (y == 1 ? exp_example_betaTx : 1.0 / exp_example_betaTx); 
+				double p = exp_example_betaTx / (1.0 + exp_example_betaTx);
 
 				p = LIMIT(p, P_MIN, P_MAX);
 
@@ -1736,6 +1903,12 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 				sum_w_x_2 += w * x * x;
 				sum_w_q_x += w * q * x;
 
+				if (isnan(sum_w_x_2) || isnan(sum_w_q_x)) {
+					cout << "NaN! feature_id = " << feature_id << " sum_w_q_x = " << sum_w_q_x << " wum_w_x_2 = " << sum_w_x_2 << " w  = " << w  << " q = " << q << " x = " << x;
+					cout << " p = " << p << " exp_example_betaTx = " << exp_example_betaTx << endl;
+					return;
+				} 
+
 				subgrad[feature_id] += - y * x / (1.0 + exp_y_example_betaTx);
 				
 				lines_processed++;
@@ -1746,6 +1919,11 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 				
 			update_feature(sum_w_q_x, sum_w_x_2, beta_max, feature_id, shrinkage, shrinkage_max,
 					vm["beta-min"].as<float>(), vm["zero-max-shrinkage"].as<int>(), f_lambda);
+
+			if (isnan(g_beta_new[feature_id])) {
+				cout << "NaN! feature_id = " << feature_id << " sum_w_q_x = " << sum_w_q_x << " wum_w_x_2 = " << sum_w_x_2 << " beta_max = " << beta_max << endl;
+				return;
+			} 
 		}
 
 		stop_timer("iterations");
@@ -1816,8 +1994,8 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 		stop_timer("debug: calc subgradient");
 
 		double subgrad_norm_exact_local = 0.0, subgrad_norm_exact = 0.0;
-		iter_stat[iter].subgrad_norm_local = subgrad_norm_local;
-		iter_stat[iter].subgrad_norm = subgrad_norm;
+		iter_stat[iter].subgrad_norm_local = sqrt(subgrad_norm_local);
+		iter_stat[iter].subgrad_norm = sqrt(subgrad_norm);
 
 		//
 		// Linear search
@@ -1937,6 +2115,9 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 
 				g_exp_betaTx[i] *= exp(best_alpha * g_betaTx_delta[i]);
 			
+				//if (std::fpclassify (g_exp_betaTx[i]) == FP_INFINITE)
+				//	g_exp_betaTx[i] = 1.0e20;
+			
 				g_betaTx_delta[i] = 0.0;
 			}
 
@@ -2003,160 +2184,16 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 	if (!vm["final-regressor"].empty())
 		save_beta(vm["final-regressor"].as<string>());
 
-	//
-	// Print iter-wise stat
-	//
-	printf("Iter\tLoss\tRelLossDiff\tIdealRelLossDiff\tRelSumErr\tTime\tFullTime\tSubGradNorm\tSubGradNormLocal\tCoeffsNorm\tGlobalBadCoord\tAlpha\tBackSearch\n");
-
-	for (int i = 0; i <= iterations_done; ++i) {
-		printf("%3d\t%.10e\t% .10e\t% .10e\t% .10e\t%d\t%d\t%.10e\t%.10e\t%f\t%ld\t%f\t%d\n",
-			i, iter_stat[i].loss, iter_stat[i].rel_loss_diff, iter_stat[i].ideal_rel_loss_diff, iter_stat[i].rel_sum_err, 
-			iter_stat[i].time, iter_stat[i].full_time, iter_stat[i].subgrad_norm, iter_stat[i].subgrad_norm_local, \
-			iter_stat[i].coeffs_norm, (ulong)iter_stat[i].global_bad_coord, iter_stat[i].alpha, iter_stat[i].back_search_count);
-	}
-
+	print_iter_stat(iter_stat, iterations_done);
 }
 
-int main(int argc, char **argv)
+int solve_problem(int iterations_max, const po::variables_map& vm, string cache_filename, float termination_eps, bool distributed, vector<float> lambda_1)
 {
-	time(&g_start_time);
-	srand(107);
-
-	vector<float> default_lambda(1, 1);
-
-	po::options_description general_desc("General options");
-	general_desc.add_options()
-        	("help,h", "produce help message")
-        	("dataset,d", po::value<string>(), "training set in the inverted index form")
-        	("labels,l", po::value<string>(), "labels of the training set")
-        	("initial-regressor,i", po::value<string>(), "initial weights")
-        	("final-regressor,f", po::value<string>(), "final weights")
-		("lambda-1", po::value<vector<float> >()->default_value(default_lambda, "1.0"), "L1 regularization, allowed multiple values")
-		("lambda-path", po::value<int>(), "L1 regularization, number of labmdas in regularization path")
-		("combine-type,c", po::value<int>()->default_value(1), "type of deltas combination during AllReduce: \n0 - sum, 1 - best, 2 - Nelder-Mead, 3 - discrete opt, 4 - random, 5 - smart sum, 6 - shrinked sum")
-		("termination", po::value<float>()->default_value(1.0e-4), "termination criteria")
-		("iterations", po::value<int>()->default_value(100), "maximum number of iterations")
-		("save-per-iter", "save beta every iteration")
-		("beta-max", po::value<float>()->default_value(10.0), "maximum absolute beta[i]")
-		("beta-min", po::value<float>()->default_value(0.0), "minimum absolute beta[i]")
-		("random-count", po::value<int>()->default_value(2), "number of deltas taken randomly")
-		("no-back-search", "don't make back search")
-		("active", "use active features set")
-		("initial-shrinkage", po::value<float>()->default_value(1.0), "initial shrinkage value")
-		("increase-shrinkage", po::value<int>()->default_value(0), "increase shrinkage if alpha < 1.0")
-		("decrease-shrinkage", po::value<int>()->default_value(0), "decrease shrinkage if alpha = 1.0")
-		("zero-max-shrinkage", po::value<int>()->default_value(0), "always use maximum shrinkage for zero features")
-		("linear-search", "make accurate linear search")
-		("find-bias", "initial finding bias")
-		("last-iter-sum", "add all differences at last iteration")
-        	;
-
-	po::options_description cluster_desc("Cluster options");
-	cluster_desc.add_options()
-        	("server", po::value<string>(), "master server")
-        	("unique-id", po::value<int>()->default_value(1), "unique id of the learning transaction")
-        	("node", po::value<int>(), "node index")
-        	("total", po::value<int>(), "total number of nodes")
-        	("sync", po::value<int>()->default_value(0), "sync nodes")
-        	;
-
-	po::options_description all_desc("Allowed options");
-	all_desc.add(general_desc).add(cluster_desc);
-
-	po::variables_map vm;
-	po::store(po::parse_command_line(argc, argv, all_desc), vm);
-	po::notify(vm);  
-
-	if (vm.count("help")) {
-		cout << general_desc << "\n" << cluster_desc << "\n";
-		return 0;
-	}
-
-//	printf("%d", (int)vm.count("lambda-path"));
-//	return 0;
-
-	string dataset_filename = vm["dataset"].as<string>();
-	vector<float> lambda_1 = vm["lambda-1"].as<vector<float> >();
-	int iterations_max = vm["iterations"].as<int>();
-	bool distributed = !vm["server"].empty();
-	float termination_eps = vm["termination"].as<float>();
-
-	extern global_data global;
-
-	if (distributed) {
-		g_master_location = vm["server"].as<string>();
-		global.unique_id = vm["unique-id"].as<int>();
-		global.node = vm["node"].as<int>();
-		global.total = vm["total"].as<int>();
-	}
-
-	//
-	// Create cache file
-	//
-	string cache_filename;
-
-	if (dataset_filename == string("/dev/stdin")) {
-		cache_filename = "stdin.cache";
-	}
-	else {
-		cache_filename = dataset_filename + ".cache";
-	}
-
-	feature_t max_feature_id = 0;
-	example_t max_example_id = 0;
-	ulong lines_count = 0;
-	feature_t unique_features = 0;
-
-	g_cache.Create(dataset_filename.c_str(), cache_filename.c_str(), &max_feature_id, &lines_count, &unique_features);
-//	g_cache.InitY(g_example_count, g_feature_count, distributed, vm);
-	g_cache.ReadY(vm["labels"].as<string>().c_str(), &max_example_id);
-
-	printf("debug: max_feature_id %ld\n", (ulong)max_feature_id);
-	printf("debug: max_example_id %ld\n", (ulong)max_example_id);
-
-	if (distributed) {
-		if (vm["sync"].as<int>()) sync_nodes();
-
-		start_timer("sync dataset info");
-		max_feature_id = max_allreduce(max_feature_id);
-		stop_timer("sync dataset info");
-	}
-
-	g_feature_count = max_feature_id + 1;
-	g_example_count = max_example_id + 1;
-
-	g_cache.InitCache(g_feature_count);
-	g_all_y = g_cache.GetY();
-
-	printf("lines count      = %ld\n", lines_count);
-	printf("unique features  = %ld\n", (ulong)unique_features);
-	printf("feature count    = %ld\n", (ulong)g_feature_count);
-	printf("example count    = %ld\n", (ulong)g_example_count);
-	printf("final regressor  = %s\n", !vm["final-regressor"].empty() ? vm["final-regressor"].as<string>().c_str() : "");
-	printf("combination type = %d\n", vm["combine-type"].as<int>());
-	printf("iterations_max   = %d\n", iterations_max);
-	printf("termination_eps  = %e\n", termination_eps);
-	printf("random count     = %d\n", vm["random-count"].as<int>());
-	printf("back search      = %d\n", !vm.count("no-back-search"));
-
-	if (distributed) {
-		printf("server = %s\n", g_master_location.c_str());
-		printf("node = %ld\n", global.node);
-		printf("total = %ld\n", global.total);
-		printf("unique id = %ld\n", global.unique_id);
-	}
-
-	if (vm.count("initial-regressor"))
-		printf("using initial regressor %s\n", vm["initial-regressor"].as<string>().c_str());
-
-	printf("\n");
-	printf("\n");
-
 	//
 	// Allocating important vectors
 	//
 	//g_betaTx = (float*)safe_calloc(g_example_count, sizeof(float));
-	g_exp_betaTx = (float*)safe_calloc(g_example_count, sizeof(float));
+	g_exp_betaTx = (double*)safe_calloc(g_example_count, sizeof(double));
 	g_betaTx_delta = (float*)safe_calloc(g_example_count, sizeof(float));
 	g_beta = (float*)safe_calloc(g_feature_count, sizeof(float));
 	g_beta_new = (float*)safe_calloc(g_feature_count, sizeof(float));
@@ -2243,4 +2280,319 @@ int main(int argc, char **argv)
 	safe_free(feature_lambda);
 
 	return 0;
+}
+
+int LOSS_SQUARED = 0;
+int LOSS_LOGISTIC = 1;
+
+int solve_admm(int iterations_max, const po::variables_map& vm, string cache_filename, float termination_eps, bool distributed, float lambda_1)
+{
+	IterStat iter_stat[iterations_max + 1];
+	memset(iter_stat, 0, sizeof(iter_stat));
+	iter_stat[0].loss = 0.0;
+	iter_stat[0].time = 0;
+	iter_stat[0].subgrad_norm = 0.0;
+
+	float *xk = (float*)safe_calloc(g_feature_count, sizeof(float));
+	float *zk = (float*)safe_calloc(g_example_count, sizeof(float));
+	float *uk = (float*)safe_calloc(g_example_count, sizeof(float));
+	float *Ax = (float*)safe_calloc(g_example_count, sizeof(float));
+	float *Ax_copy = (float*)safe_calloc(g_example_count, sizeof(float));
+	float *Axk = (float*)safe_calloc(g_example_count, sizeof(float));
+	float *Aixik = (float*)safe_calloc(g_example_count, sizeof(float));
+
+	float *subgrad = (float*)safe_calloc(g_feature_count, sizeof(float));
+	float x[g_feature_count];
+
+	float rho = vm["rho"].as<float>();
+
+	for (int iter = 1; iter <= iterations_max; iter++) {
+		
+		start_timer("iterations");
+		printf("Iteration %d\n", iter);
+		printf("--------------\n");
+
+		feature_t processed_features = 0;
+		int lines_processed = 0;
+		memset(subgrad, 0, g_feature_count * sizeof(float));
+
+		for (int lasso_iter = 1; lasso_iter <= 1; lasso_iter++) {
+
+			g_cache.Rewind();
+			cout << "------------------" << endl;
+
+			for (feature_t feature_idx = 0; feature_idx < g_cache.GetCacheFeatureCount(); ++feature_idx) {
+				
+				feature_t feature_id = g_cache.GetFeatureId(feature_idx);
+				g_cache.ReadVariable(&feature_id);
+
+				example_t example_id;
+				int y;
+				float a;
+
+				double sum_1 = 0.0, sum_2 = 0.0;
+				subgrad[feature_id] = 0.0;
+				double t = 0.0;
+
+				while (g_cache.ReadLine(&example_id, &a, &y, NULL)) {
+
+					float y_tmp = -(Ax[example_id] - xk[feature_id] * a) + Aixik[example_id] + zk[example_id] - Axk[example_id] - uk[example_id];
+	
+					sum_1 += y_tmp * a;
+					sum_2 += a * a;
+					lines_processed++;
+
+					if (vm["loss"].as<int>() == LOSS_SQUARED) {
+						subgrad[feature_id] += a * (Ax_copy[example_id] - y);
+					}
+					else {
+						subgrad[feature_id] += y * a / (1.0 + exp(y * Ax_copy[example_id]));
+					}
+				}
+			
+				float x_new = (sum_2 > 0 ? soft_threshold(sum_1, lambda_1 / rho) / sum_2 : 0.0);
+
+				subgrad[feature_id] = soft_threshold(subgrad[feature_id], lambda_1);
+
+				update_feature_admm(x_new - xk[feature_id], Ax);
+				xk[feature_id] = x_new;
+			}
+
+
+			memcpy(Ax_copy, Ax, g_example_count * sizeof(float));
+
+			if (distributed) {
+				accumulate_vector(g_master_location, Ax_copy, g_example_count);
+			}
+
+			double subgrad_local_norm = square_norm(subgrad, g_feature_count);
+			float subgrad_norm = subgrad_local_norm;
+
+			if (distributed) {
+				subgrad_norm = sqrt(accumulate_scalar(g_master_location, SQUARE(subgrad_local_norm)));
+			}
+			
+			iter_stat[iter].loss = get_logistic_loss_admm(g_cache.GetY(), Ax_copy, xk);
+			iter_stat[iter].subgrad_norm = subgrad_norm;
+			iter_stat[iter].full_time = get_full_time();
+
+			cout << "loss = " << iter_stat[iter].loss << endl;
+			cout << "subgrad =" << subgrad_norm << endl;
+		}
+
+		memcpy(Aixik, Ax, g_example_count * sizeof(float));
+		memcpy(Axk, Ax, g_example_count * sizeof(float));
+
+		if (distributed) {
+			accumulate_vector(g_master_location, Axk, g_example_count);
+			accumulate_vector(g_master_location, subgrad, g_feature_count);
+		}
+
+		float alpha = 1.0;
+
+		for (example_t i = 0; i < g_example_count; ++i) {
+			int N = (distributed ? global.total : 1);
+
+			Axk[i] /= N;
+			float Axk_hat = alpha * Axk[i] + (1 - alpha) * zk[i];
+
+			if (vm.count("loss") == LOSS_SQUARED) {
+				zk[i] = (g_all_y[i] + rho * Axk_hat + rho * uk[i]) / (N + rho);
+			}
+			else {
+				double a = rho / N;
+				double c = g_all_y[i] * N *(Axk_hat + uk[i]);				
+
+				double x = solve_one_dim_log_reg(0, a, c); 
+
+				zk[i] = g_all_y[i] * x / N;
+			}
+
+			uk[i] = uk[i] + Axk[i] - zk[i];
+		}
+
+		memcpy(x, xk, sizeof(float) * g_feature_count);
+		accumulate_vector(g_master_location, x, g_feature_count);
+
+		if (vm.count("save-per-iter") && !vm["final-regressor"].empty()) {
+			int lambda_idx = 0;
+			string filename = vm["final-regressor"].as<string>() + string(".") + to_string(lambda_idx, "%03d") + string(".") + to_string(iter, "%03d");
+			cout << "saving regressor into " << filename << endl;
+
+			save_beta(filename, x);
+		}
+
+		stop_timer("iterations");
+	}
+
+	safe_free(xk);
+	safe_free(zk);
+	safe_free(uk);
+	safe_free(Ax);
+	safe_free(Ax_copy);
+	safe_free(Axk);
+	safe_free(Aixik);
+	safe_free(subgrad);
+
+	if (!vm["final-regressor"].empty())
+		save_beta(vm["final-regressor"].as<string>(), x);
+
+	print_iter_stat(iter_stat, iterations_max);
+}
+
+int main(int argc, char **argv)
+{
+	time(&g_start_time);
+	srand(107);
+
+	vector<float> default_lambda(1, 1);
+
+	po::options_description general_desc("General options");
+	general_desc.add_options()
+        	("help,h", "produce help message")
+        	("dataset,d", po::value<string>(), "training set in the inverted index form")
+        	("labels,l", po::value<string>(), "labels of the training set")
+        	("initial-regressor,i", po::value<string>(), "initial weights")
+        	("final-regressor,f", po::value<string>(), "final weights")
+		("lambda-1", po::value<vector<float> >()->default_value(default_lambda, "1.0"), "L1 regularization, allowed multiple values")
+		("lambda-path", po::value<int>(), "L1 regularization, number of labmdas in regularization path")
+		("combine-type,c", po::value<int>()->default_value(1), "type of deltas combination during AllReduce: \n0 - sum, 1 - best, 2 - Nelder-Mead, 3 - discrete opt, 4 - random, 5 - smart sum, 6 - shrinked sum")
+		("termination", po::value<float>()->default_value(1.0e-4), "termination criteria")
+		("iterations", po::value<int>()->default_value(100), "maximum number of iterations")
+		("save-per-iter", "save beta every iteration")
+		("beta-max", po::value<float>()->default_value(10.0), "maximum absolute beta[i]")
+		("beta-min", po::value<float>()->default_value(0.0), "minimum absolute beta[i]")
+		("random-count", po::value<int>()->default_value(2), "number of deltas taken randomly")
+		("no-back-search", "don't make back search")
+		("active", "use active features set")
+		("initial-shrinkage", po::value<float>()->default_value(1.0), "initial shrinkage value")
+		("increase-shrinkage", po::value<int>()->default_value(0), "increase shrinkage if alpha < 1.0")
+		("decrease-shrinkage", po::value<int>()->default_value(0), "decrease shrinkage if alpha = 1.0")
+		("zero-max-shrinkage", po::value<int>()->default_value(0), "always use maximum shrinkage for zero features")
+		("linear-search", "make accurate linear search")
+		("find-bias", "initial finding bias")
+		("last-iter-sum", "add all differences at last iteration")
+		;
+
+	po::options_description admm_desc("ADMM options");
+	admm_desc.add_options()
+		("admm", "use ADMM")
+		("rho", po::value<float>()->default_value(1.0), "the rho parameter")
+        	("loss", po::value<int>()->default_value(0), "loss type (squared=0, logistic=1)")
+        	;
+
+	po::options_description cluster_desc("Cluster options");
+	cluster_desc.add_options()
+        	("server", po::value<string>(), "master server")
+        	("unique-id", po::value<int>()->default_value(1), "unique id of the learning transaction")
+        	("node", po::value<int>(), "node index")
+        	("total", po::value<int>(), "total number of nodes")
+        	("sync", po::value<int>()->default_value(0), "sync nodes")
+        	;
+
+	po::options_description all_desc("Allowed options");
+	all_desc.add(general_desc).add(admm_desc).add(cluster_desc);
+
+	po::variables_map vm;
+	po::store(po::parse_command_line(argc, argv, all_desc), vm);
+	po::notify(vm);  
+
+	if (vm.count("help")) {
+		cout << general_desc << "\n" << admm_desc << "\n" << cluster_desc << "\n";
+		return 0;
+	}
+
+
+//	printf("%d", (int)vm.count("lambda-path"));
+//	return 0;
+
+	string dataset_filename = vm["dataset"].as<string>();
+	vector<float> lambda_1 = vm["lambda-1"].as<vector<float> >();
+	int iterations_max = vm["iterations"].as<int>();
+	bool distributed = !vm["server"].empty();
+	float termination_eps = vm["termination"].as<float>();
+
+	extern global_data global;
+
+	if (distributed) {
+		g_master_location = vm["server"].as<string>();
+		global.unique_id = vm["unique-id"].as<int>();
+		global.node = vm["node"].as<int>();
+		global.total = vm["total"].as<int>();
+	}
+
+	//
+	// Create cache file
+	//
+	string cache_filename;
+
+	if (dataset_filename == string("/dev/stdin")) {
+		cache_filename = "stdin.cache";
+	}
+	else {
+		cache_filename = dataset_filename + ".cache";
+	}
+
+	feature_t max_feature_id = 0;
+	example_t max_example_id = 0;
+	ulong lines_count = 0;
+	feature_t unique_features = 0;
+
+	g_cache.Create(dataset_filename.c_str(), cache_filename.c_str(), &max_feature_id, &lines_count, &unique_features);
+//	g_cache.InitY(g_example_count, g_feature_count, distributed, vm);
+	g_cache.ReadY(vm["labels"].as<string>().c_str(), &max_example_id);
+
+	printf("debug: max_feature_id %ld\n", (ulong)max_feature_id);
+	printf("debug: max_example_id %ld\n", (ulong)max_example_id);
+
+	if (distributed) {
+		if (vm["sync"].as<int>()) sync_nodes();
+
+		start_timer("sync dataset info");
+		max_feature_id = max_allreduce(max_feature_id);
+		stop_timer("sync dataset info");
+	}
+
+	g_feature_count = max_feature_id + 1;
+	g_example_count = max_example_id + 1;
+
+	g_cache.InitCache(g_feature_count);
+	g_all_y = g_cache.GetY();
+
+	printf("lines count      = %ld\n", lines_count);
+	printf("unique features  = %ld\n", (ulong)unique_features);
+	printf("feature count    = %ld\n", (ulong)g_feature_count);
+	printf("example count    = %ld\n", (ulong)g_example_count);
+	printf("final regressor  = %s\n", !vm["final-regressor"].empty() ? vm["final-regressor"].as<string>().c_str() : "");
+	printf("combination type = %d\n", vm["combine-type"].as<int>());
+	printf("iterations_max   = %d\n", iterations_max);
+	printf("termination_eps  = %e\n", termination_eps);
+	printf("random count     = %d\n", vm["random-count"].as<int>());
+	printf("back search      = %d\n", !vm.count("no-back-search"));
+	printf("loss             = %d\n", vm["loss"].as<int>());
+
+	if (distributed) {
+		printf("server = %s\n", g_master_location.c_str());
+		printf("node = %ld\n", global.node);
+		printf("total = %ld\n", global.total);
+		printf("unique id = %ld\n", global.unique_id);
+	}
+
+	if (vm.count("initial-regressor"))
+		printf("using initial regressor %s\n", vm["initial-regressor"].as<string>().c_str());
+
+	printf("\n");
+	printf("\n");
+
+	int ret;
+
+	if (!vm.count("admm")) {
+		ret = solve_problem(iterations_max, vm, cache_filename, termination_eps, distributed, lambda_1);
+	}
+	else {
+		g_lambda_1 = lambda_1[0];
+		ret = solve_admm(iterations_max, vm, cache_filename, termination_eps, distributed, lambda_1[0]);
+	}
+		
+	return ret; 
 }
