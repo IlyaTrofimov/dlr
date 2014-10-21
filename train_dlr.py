@@ -84,6 +84,9 @@ id_client.py HOST PORT finish;
 	reducer = reducer.replace('UNIQUE_ID', str(randint(0, 1000000)))
 	if initial:
 		reducer = reducer.replace('INITIAL', '-i initial')
+	else:
+		reducer = reducer.replace('INITIAL', '')
+		
 
 	return reducer
 
@@ -140,9 +143,8 @@ class IDServer(Process):
 
 			if start_count > self.__jobcount:
 				print 'Error: start_count > jobcount'
-				print datetime.datetime.now()
-#				status = False
-#				break
+				status = False
+				break
 
 			if finish_count == self.__jobcount:
 				status = True
@@ -314,7 +316,10 @@ def get_iter_stat(dump_dir):
 			with open(os.path.join(dump_dir, item)) as log_file:
 				text = log_file.read()	
 				match = re.match('[\s\S]*(Iter\s*Loss[\s\w]*\n[\s*[\d.+-e]*\n]*)', text)
-				return match.group(1)
+				s = match.group(1)
+
+#	return '\n'.join(filter(lambda x : len(x) > 10, s.split('\n')))
+	return s
 
 def sigma(v):
 	avg = 0.0
@@ -422,29 +427,47 @@ def write_task_description(a_dump_dir, task):
 	with open('%s/task' % a_dump_dir, 'w') as f:
 		print >>f, str(task)
 
-def create_reports(a_dump_dir, task):
+def read_task(a_dump_dir):
+	with open('%s/task' % a_dump_dir, 'r') as f:
+		s_task = f.read()
+	return eval(s_task)
+
+def create_reports(a_dump_dir, task, calc_metrics = True):
+
+	if task is None:
+		task = read_task(a_dump_dir)
 
 	iterations = int(task['params']['iterations'])
 	jobcount = int(task['jobcount'])
-	distributed = bool(jobcount > 1)
 	test_file = task['test_file']
+	distributed = bool(jobcount > 1)
 
-	execute('cd %s; tar xfvz *.model.tar.gz' % a_dump_dir)
-	str_all_metrics, all_metrics = get_models_metrics(a_dump_dir, iterations, test_file)
+	if calc_metrics:
+		execute('cd %s; tar xfvz *.model.tar.gz' % a_dump_dir)
+		str_all_metrics, all_metrics = get_models_metrics(a_dump_dir, iterations, test_file)
 
-	with open('%s/test_metrics' % a_dump_dir, 'w') as f:
-		print >>f, str_all_metrics
+		with open('%s/test_metrics' % a_dump_dir, 'w') as f:
+			f.write(str_all_metrics)
+#			print >>f, str_all_metrics
 
-	with open('%s/joined_stat' % a_dump_dir, 'w') as f:
-		iter_stat = get_iter_stat(a_dump_dir)
-		test_metrics = get_test_metrics(a_dump_dir)
-		print >>f, join_metrics(iter_stat, test_metrics)
+	with open('%s/log_metrics' % a_dump_dir, 'w') as f:
+		f.write(get_iter_stat(a_dump_dir))
+#		print >>f, get_iter_stat(a_dump_dir).replace("\n\n", "\n")
+
+	execute('cat %s/log_metrics | tabmap \'$Iter=int($Iter)\'> %s/log_metrics2' % (a_dump_dir, a_dump_dir))
+	execute('cat %s/test_metrics | tr " " "\\t" | tabmap --prepend \'$Iter||=0; $Iter++\' > %s/test_metrics2' % (a_dump_dir, a_dump_dir))
+	execute('tabjoin --file1 %s/log_metrics2 --file2 %s/test_metrics2 --key Iter > %s/joined_stat' % (a_dump_dir, a_dump_dir, a_dump_dir))
+
+#	with open('%s/joined_stat' % a_dump_dir, 'w') as f:
+#		iter_stat = get_iter_stat(a_dump_dir)
+#		test_metrics = get_test_metrics(a_dump_dir)
+#		print >>f, join_metrics(iter_stat, test_metrics)
 
 	etalon_loss = task['etalon_loss']
 
 	with NamedTemporaryFile() as tmpfile:
 		execute('cp %s/joined_stat %s' % (a_dump_dir, tmpfile.name))
-		execute('cat %s | tabmap \'$RelLoss = ($Loss - %f) / %f; $CoeffsNormAlpha = $CoeffsNorm * $Alpha\' > %s/joined_stat' % (tmpfile.name, etalon_loss, etalon_loss, a_dump_dir))
+		execute('cat %s | tabmap \'$RelLoss = ($Loss - %f) / %f; $CoeffsNormAlpha = $CoeffsNorm * $Alpha\' | tabsort -g -k Iter > %s/joined_stat' % (tmpfile.name, etalon_loss, etalon_loss, a_dump_dir))
 
 	with open('%s/time_summary' % a_dump_dir, 'w') as f:
 		print >>f, get_time_summary(a_dump_dir, int(iterations))
@@ -594,7 +617,7 @@ if __name__ == '__main__':
 	task['initial-regressor'] = '/mnt/raid/home/trofim/dlr/dump-20140531-0/model.001.004'
 #	task['params']['iterations'] = 10;
 #	task['params']['lambda-1'] = get_lambda_list([pow(2, x) for x in xrange(10, -1, -1)])
-	tasks.append(task)
+#	tasks.append(task)
 
 #	task = deepcopy(base_task)
 #	task['params']['combine-type'] = 1;
@@ -627,9 +650,9 @@ if __name__ == '__main__':
 		'test_file':		'/mnt/raid/home/trofim/genkin/epsilon_normalized.t',
 		'jobcount':		16,
 		'params': {
-			'iterations':		30,
-#			'lambda-1':		2.0,
-			'termination':		0.0,
+			'iterations':		100,
+			'lambda-1':		2.078125,
+			'termination':		0.0e-6,
 			'combine-type':		0,
 			'save-per-iter':	1,
 			'beta-max':		100,
@@ -638,14 +661,11 @@ if __name__ == '__main__':
 		}
 
 	task = deepcopy(base_task)
-	task['params']['termination'] = 1.0e-3
 	task['params']['linear-search'] = 1;
 	task['params']['last-iter-sum'] = 1;
 #	task['params']['lambda-1'] = get_lambda_list([40.0, 32.0, 16.0, 8.0, 4.0, 3.2, 1.6])
-	task['params']['lambda-path'] = 20
+#	task['params']['lambda-path'] = 20
 
-#	tasks.append(task)
-#
 #----------------------------------------------------
 #	"webspam" dataset
 #----------------------------------------------------
@@ -656,8 +676,8 @@ if __name__ == '__main__':
 		'test_file':		'/mnt/raid/home/trofim/dlr/webspam_wc_normalized_trigram.test',
 		'jobcount':		16,
 		'params': {
-			'iterations':		30,
-#			'lambda-1':		1 / 64.0,
+			'iterations':		100,
+			'lambda-1':		1 / 64.0,
 			'termination':		0.0,
 			'combine-type':		0,
 			'save-per-iter':	1,
@@ -666,12 +686,12 @@ if __name__ == '__main__':
 		'etalon_loss': 2005.81766840625
 		}
 
-	task = deepcopy(base_task)
-	task['params']['termination'] = 1.0e-3
-	task['params']['linear-search'] = 1;
-	task['params']['last-iter-sum'] = 1;
-#	task['params']['lambda-1'] = get_lambda_list([pow(2, -x) for x in xrange(-2, 12)])
-	task['params']['lambda-path'] = 20
+	webspam_task = deepcopy(base_task)
+#	webspam_task['params']['termination'] = 1.0e-3
+	webspam_task['params']['linear-search'] = 1;
+	webspam_task['params']['last-iter-sum'] = 1;
+#	webspam_task['params']['lambda-1'] = get_lambda_list([pow(2, -x) for x in xrange(-2, 12)])
+#	webspam_task['params']['lambda-path'] = 20
 
 #	tasks.append(task)
 
@@ -703,14 +723,19 @@ if __name__ == '__main__':
 	task = deepcopy(base_task)
 	task['params']['termination'] = 1.0e-3;
 	task['params']['last-iter-sum'] = 1;
-	task['params']['lambda-1'] = get_lambda_list([pow(2, x) for x in xrange(14, -1, -1)])
+	task['params']['lambda-1'] = get_lambda_list([5461.335938, 4754.362269, 4138.906824, 3603.122507, 3136.695836, 2730.667969])
+#	task['params']['lambda-path'] = 20
+
 #	tasks.append(task)
 
-	task = deepcopy(base_task)
-	task['params']['termination'] = 1.0e-3;
-	task['params']['last-iter-sum'] = 1;
-	task['params']['lambda-1'] = get_lambda_list([pow(2, x) for x in xrange(10, -1, -1)])
-#	tasks.append(task)
+#	parent_dir = '/mnt/raid/home/trofim/dlr/meta-dump-20140926/'
+#	dumps = ['dump-20140925-0', 'dump-20140925-1', 'dump-20140925-2', 'dump-20140925-3', 'dump-20140925-4', 'dump-20140926-0', 'dump-20140926-1', 'dump-20140926-2']
+#
+#	for dump in dumps:
+#		create_reports(a_dump_dir = parent_dir + dump, task = None, calc_metrics = False)
+
+	for i in xrange(10):
+		tasks.append(webspam_task)
 
 	for task in tasks:
 		process_task(task)

@@ -3,15 +3,9 @@ import os
 import sys
 import socket
 import datetime
-from time import sleep
 from random import randint
 from optparse import OptionParser
-from socket import gethostname
-from multiprocessing import Process, Pipe
-from math import sqrt
-import re
 from copy import deepcopy
-from tempfile import NamedTemporaryFile
 
 from test_dlr_dist import local_dist_run
 from test_dlr import get_models_metrics
@@ -127,8 +121,8 @@ if __name__ == '__main__':
 #----------------------------------------------------
 
 	base_task = {
-		'train_tables':		'dlr/data/epsilon-train.ii2',
-		'label_table':		'dlr/data/epsilon-train.label',
+		'train_tables':		'dlr/data/epsilon.train.ii2',
+		'label_table':		'dlr/data/epsilon.train.label',
 		'test_file':		'~/dlr_data/epsilon_normalized.t',
 		'jobcount':		16,
 		'params': {
@@ -158,7 +152,7 @@ if __name__ == '__main__':
 	base_task = {
 		'train_tables':		'users/trofim/genkin/webspam.train.ii2',
 		'label_table':		'users/trofim/genkin/webspam.train.label',
-		'test_file':		'/mnt/raid/home/trofim/dlr/webspam_wc_normalized_trigram.test',
+		'test_file':		'~/dlr_data/webspam_wc_normalized_trigram.test',
 		'jobcount':		16,
 		'params': {
 			'iterations':		100,

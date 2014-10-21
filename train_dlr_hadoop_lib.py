@@ -7,7 +7,6 @@ from time import sleep
 from random import randint
 from optparse import OptionParser
 from socket import gethostname
-from multiprocessing import Process, Pipe
 from math import sqrt
 import re
 from copy import deepcopy
@@ -24,7 +23,6 @@ A wrapper for DLR training on a Hadoop cluster.
 ----------------------------------------------------------------------
 '''
 
-TEST = False
 SPANNING_TREE_SERVER = '141.8.180.50'  # w050h
 
 def execute(cmd):
@@ -66,10 +64,13 @@ gunzip -f label.tmp.gz;
 touch model_empty;
 tar cfz models.tar.gz *model*;
 
-if [ "$reducer_id" == '000000' ]; then
-	hdfs dfs -put -f log $output_dir;
-	hdfs dfs -put -f models.tar.gz $output_dir;
-fi;
+#if [ "$reducer_id" == '000000' ]; then
+#	hdfs dfs -put -f log $output_dir;
+#	hdfs dfs -put -f models.tar.gz $output_dir;
+#fi;
+
+hdfs dfs -put -f log $output_dir.reducer$reducer_id.log;
+hdfs dfs -put -f models.tar.gz $output_dir/reducer$reducer_id.models.tar.gz;
 '''
 
 	SERVER_PARAMS = '--server HOST --total $nreducers --unique-id $mapred_job_id --node $reducer_id'
@@ -85,98 +86,10 @@ fi;
 
 	return reducer
 
-class VWTrainer(Process):
-	''' Class is dedicated for asynchonous running mapreduce process with bash-script'''
-
-	def __init__(self, script):
-		self.__script = script
-		Process.__init__(self)
-
-	def run(self):
-		execute(self.__script)
-
-class IDServer(Process):
-	''' Class is dedicated for asynchonous running ID server for controlling mappers'''
-
-	def __init__(self, jobcount, child_con):
-		self.__jobcount = jobcount
-		self.__child_con = child_con
-		Process.__init__(self)
-	
-	def run(self):
-		print 'ID SERVER STARTED'
-
-		s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-		s.bind(('', 0))
-		print 'HOST = %s PORT = %d' % (s.getsockname()[0], s.getsockname()[1])
-		print
-
-		port = s.getsockname()[1]
-		self.__child_con.send(port)
-
-		s.listen(self.__jobcount)
-		status = False
-
-		start_count = 0
-		finish_count = 0
-
-		while start_count < 1000:
-			conn, addr = s.accept()
-			message = conn.recv(1024)
-
-			if message == 'start':
-				print 'Connected by %s, jobid %d, %s' % (addr, start_count, message)
-				conn.send(str(start_count))
-				start_count += 1
-			else:
-				finish_count += 1
-				conn.send('0')
-				print 'Connected by %s, finish_count %d' % (addr, finish_count)
-			
-			conn.close()
-
-			if start_count > self.__jobcount:
-				print 'Error: start_count > jobcount'
-				status = False
-				break
-
-			if finish_count == self.__jobcount:
-				status = True
-				break
-			
-		s.close()
-		self.__child_con.send(status)
-
 def table_exists(table):
 	''' Checks is table exists'''
 
 	return os.system("hdfs dfs -test -e %s" % table) == 0
-
-def py_execute(cmd):
-	''' Execute bash script and returns stdout '''
-
-	tmp_file = '/tmp/%d' % randint(0, 1000000)
-	execute('%s > %s' % (cmd, tmp_file))
-	file = open(tmp_file)
-	res = file.read()
-	file.close()
-	execute('rm %s' % tmp_file)
-
-	return res
-
-def kill_children(pid):
-	''' Kill recursively all child processes of a process '''
-
-	res = py_execute('ps --ppid %d' % pid)
-	children_lines = res.split('\n')[1:]
-
-	for line in children_lines:
-		if len(line) > 0:
-			child_pid = int(line.strip(' ').split(' ')[0])
-			kill_children(child_pid)
-			execute('kill %d' % child_pid)
-
 
 def train_dlr(src_tables, label_table, jobcount, features, model, debug = 'debug', mapper_args = '', dump_dir = '.', save_dataset = False, head = False, initial = None):
 
