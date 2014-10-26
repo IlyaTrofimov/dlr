@@ -44,7 +44,7 @@ def get_ctr(file_name):
     return ctrs      
 
 def get_metrics_liblinear(test_file, model_file, pred_file, metrics):
-	execute('~/predict -b 1 %s %s %s' % (test_file, model_file, pred_file))
+	execute('~/liblinear/predict -b 1 %s %s %s' % (test_file, model_file, pred_file))
 	clicks = get_clicks(test_file)
 	CTR = get_ctr(pred_file)
 

@@ -83,7 +83,7 @@ def split_dataset(file_name, parts):
 
 def local_dist_run(train_file, label_file, test_file, jobcount, features, dump_dir):
 
-	server = '141.8.134.1' # bsmr-dev01i
+	server = '178.154.194.56'
 
 	metrics = ['MSE', 'NLL', 'LinCorr', 'auPRC', 'Alpha']
 
@@ -97,8 +97,7 @@ def local_dist_run(train_file, label_file, test_file, jobcount, features, dump_d
 		if nodes != 1:
 			split_dataset(train_file, nodes)
 			execute('killall dlr')
-			execute('killall spanning_tree')
-			execute('spanning_tree')
+			execute('./spanning_tree || true')
 			execute('sleep 5')
 
 		l1 = 16.0
@@ -147,7 +146,4 @@ def local_dist_run(train_file, label_file, test_file, jobcount, features, dump_d
 
 if __name__ == '__main__':
 
-	train_file = 'small_train.ii'
-	test_file =  'small_test.svm'
-
-	local_dist_run(train_file, test_file)
+	local_dist_run('small_train_ro_0.1.ii2', 'small_train_ro_0.1.label', 'small_test_ro_0.1.svm', 3, '--lambda-1 64.0 --save-per-iter 1 --linear-search 1 --combine-type 0', 'admm_dump')

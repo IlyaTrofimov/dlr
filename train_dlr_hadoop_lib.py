@@ -59,7 +59,7 @@ echo $mapred_job_id;
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:.;
 gunzip -f label.tmp.gz;
 
-./dlr_exec -d train -l label.tmp -f model FEATURES SERVER_PARAMS INITIAL 1> log 2>&1;
+./dlr -d train -l label.tmp -f model FEATURES SERVER_PARAMS INITIAL 1> log 2>&1;
 
 touch model_empty;
 tar cfz models.tar.gz *model*;
@@ -69,8 +69,8 @@ tar cfz models.tar.gz *model*;
 #	hdfs dfs -put -f models.tar.gz $output_dir;
 #fi;
 
-hdfs dfs -put -f log $output_dir.reducer$reducer_id.log;
-hdfs dfs -put -f models.tar.gz $output_dir/reducer$reducer_id.models.tar.gz;
+hdfs dfs -put -f log $output_dir/$reducer_id.log;
+hdfs dfs -put -f models.tar.gz $output_dir/$reducer_id.models.tar.gz;
 '''
 
 	SERVER_PARAMS = '--server HOST --total $nreducers --unique-id $mapred_job_id --node $reducer_id'
@@ -139,12 +139,9 @@ hadoop jar /usr/lib/hadoop-mapreduce/hadoop-streaming.jar \
     -mapper /bin/more \
     -reducer REDUCER \
     -file /tmp/REDUCER \
-    -file dlr_exec \
+    -file dlr \
     -file label.tmp.gz \
     -file libboost_program_options.so.1.46.1;
-
-hdfs dfs -cat OUT_DIR/models.tar.gz > DUMP_DIR/models.tar.gz;
-hdfs dfs -cat OUT_DIR/log > DUMP_DIR/reducer0.log;
 
 rm /tmp/REDUCER;
 rm label.tmp.gz;
@@ -166,6 +163,10 @@ rm label.tmp.gz;
 	print 
 
 	res = execute(script)
+
+	for i in xrange(jobcount):
+		execute('hdfs dfs -cat %s/%06d.models.tar.gz > %s/%06d.models.tar.gz' % (out_dir, i, dump_dir, i))
+		execute('hdfs dfs -cat %s/%06d.log > %s/%06d.log' % (out_dir, i, dump_dir, i))
 
 	return res == 0
 
@@ -293,6 +294,41 @@ def read_task(a_dump_dir):
 		s_task = f.read()
 	return eval(s_task)
 
+def read_file(f):
+	file = open(f)
+	s = file.read()
+	file.close()
+
+	return s
+
+def merge_models(files_list, out_file):
+
+	w = None
+
+	for f in files_list:
+		file_lines = read_file(f).strip("\n").split("\n")
+		features_count = int(file_lines[0])
+
+		weights = map(lambda x : x.split(':'), filter(lambda x : len(x) > 3, file_lines[1:]))
+	
+		if w is None:
+			w = [0.0] * features_count
+
+		for (idx, value) in weights:
+			w[int(idx)] = value
+
+	with open(out_file, 'w') as file:
+
+		file.write("solver_type L1R_LR\n")
+		file.write("nr_class 2\n")
+		file.write("label 1 -1\n")
+		file.write("nr_feature %d\n" % (features_count - 1))
+		file.write("bias -1\n")
+		file.write("w\n")
+
+		for idx in xrange(1, features_count):
+			file.write('%s\n' % w[idx])
+
 def create_reports(a_dump_dir, task, calc_metrics = True):
 
 	if task is None:
@@ -304,7 +340,14 @@ def create_reports(a_dump_dir, task, calc_metrics = True):
 	distributed = bool(jobcount > 1)
 
 	if calc_metrics:
-		execute('cd %s; tar xfvz models.tar.gz' % a_dump_dir)
+		for i in xrange(jobcount):
+			execute('cd %s; mkdir %d; tar xfz %06d.models.tar.gz -C %d' % (a_dump_dir, i, i, i))
+			
+		for p in xrange(1000):
+			if os.path.isfile('%s/%d/model.000.%03d' % (a_dump_dir, 0, p)):
+				merge_models(['%s/%d/model.000.%03d' % (a_dump_dir, i, p) for i in xrange(jobcount)], '%s/model.000.%03d' % (a_dump_dir, p))
+
+		#execute('cd %s; tar xfvz models.tar.gz' % a_dump_dir)
 		str_all_metrics, all_metrics = get_models_metrics(a_dump_dir, iterations, test_file)
 
 		with open('%s/test_metrics' % a_dump_dir, 'w') as f:
@@ -328,7 +371,7 @@ def create_reports(a_dump_dir, task, calc_metrics = True):
 
 	print 'Created dump ' + a_dump_dir
 
-def process_task(task, create_reports = True):
+def process_task(task, should_create_reports = True):
 
 	if 'report_only' in task:
 		create_reports(task['report_only'], task)
@@ -386,5 +429,8 @@ def process_task(task, create_reports = True):
 			
 		train_ok = True
 
-	if train_ok and create_reports:
-		create_reports(a_dump_dir, task)
+	if train_ok and should_create_reports:
+		try:
+			create_reports(a_dump_dir, task)
+		except:
+			pass

@@ -9,7 +9,9 @@ from copy import deepcopy
 
 from test_dlr_dist import local_dist_run
 from test_dlr import get_models_metrics
-from train_dlr_hadoop_lib import process_task
+from train_dlr_hadoop_lib import process_task, create_reports
+
+#from __future__ import with
 
 if __name__ == '__main__':
 
@@ -123,11 +125,11 @@ if __name__ == '__main__':
 	base_task = {
 		'train_tables':		'dlr/data/epsilon.train.ii2',
 		'label_table':		'dlr/data/epsilon.train.label',
-		'test_file':		'~/dlr_data/epsilon_normalized.t',
+		'test_file':		'/home/trofim/dlr_data/epsilon_normalized.t',
 		'jobcount':		16,
 		'params': {
 			'iterations':		100,
-			'lambda-1':		2.078125,
+			'lambda-1':		2.0,
 			'termination':		0.0e-6,
 			'combine-type':		0,
 			'save-per-iter':	1,
@@ -240,7 +242,7 @@ if __name__ == '__main__':
 	test_task['params']['rho'] = 1
 	test_task['params']['loss'] = 1
 
-	tasks.append(test_task)
+#	tasks.append(epsilon_task)
 
 #	parent_dir = '/mnt/raid/home/trofim/dlr/meta-dump-20140926/'
 #	dumps = ['dump-20140925-0', 'dump-20140925-1', 'dump-20140925-2', 'dump-20140925-3', 'dump-20140925-4', 'dump-20140926-0', 'dump-20140926-1', 'dump-20140926-2']
@@ -248,8 +250,11 @@ if __name__ == '__main__':
 #	for dump in dumps:
 #		create_reports(a_dump_dir = parent_dir + dump, task = None, calc_metrics = False)
 
-	for i in xrange(1):
-		tasks.append(epsilon_task)
+	for i in [2, 4]:
+		epsilon_task['params']['rho'] = 2 ** i;
+		tasks.append(deepcopy(epsilon_task))
+
+#	create_reports('./dump-20141023-9', None)
 
 	for task in tasks:
-		process_task(task, create_reports = False)
+		process_task(task, should_create_reports = True)

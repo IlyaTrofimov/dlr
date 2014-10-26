@@ -60,6 +60,7 @@ feature_t g_example_count;
 example_t g_feature_count;
 float g_lambda_1;
 int *g_all_y;
+bool g_distributed;
 
 float *g_betaTx_delta_c[3];
 int g_n;
@@ -235,7 +236,7 @@ public:
 	int* GetY();
 	feature_t GetFeatureId(int idx);
 	feature_t GetFeatureIndex(feature_t feature_count);
-	void InitY(example_t example_count, feature_t feature_count, bool distributed, const po::variables_map& vm);
+	void InitY(example_t example_count, feature_t feature_count, const po::variables_map& vm);
 	void ReadY(const char *labels_filename, example_t *max_example_id);
 	void InitCache(feature_t feature_count);
 	void MoveToVar(feature_t feature_id);
@@ -312,7 +313,7 @@ void Cache::InitCache(feature_t feature_count)
 	_cache_feature_count = i;
 }
 
-void Cache::InitY(example_t example_count, feature_t feature_count, bool distributed, const po::variables_map& vm)
+void Cache::InitY(example_t example_count, feature_t feature_count, const po::variables_map& vm)
 {
 	Rewind();
 	_all_y = (int*)safe_calloc(example_count, sizeof(int));
@@ -320,7 +321,7 @@ void Cache::InitY(example_t example_count, feature_t feature_count, bool distrib
 	//
 	// Synchronize all_y at nodes (some nodes may not have full list of the examples)
 	//
-	if (distributed) {
+	if (g_distributed) {
 		if (vm["sync"].as<int>()) sync_nodes();
 
 		start_timer("sync all_y");
@@ -627,7 +628,8 @@ double get_loss_exact(const char *cache_filename, float alpha)
 		}
 	}
 
-	accumulate_vector(g_master_location, y_betaTx, g_example_count);
+	if (g_distributed)
+		accumulate_vector(g_master_location, y_betaTx, g_example_count);
 
 	double loss = 0.0;
 
@@ -665,7 +667,7 @@ double get_grad_norm_exact(const char *cache_filename)
 
 int approx_bsearch(const vector<float>& array, float key)
 {
-	int position;
+	int position, lowerbound = 0, upperbound = array.size();
 
 	// To start, find the subscript of the middle position.
 	position = (lowerbound + upperbound) / 2;
@@ -694,7 +696,8 @@ double get_logistic_loss_admm(int *all_y, float *betaTx, float *beta)
 		loss += g_lambda_1 * fabs(beta[i]);
 	}
 
-	loss = accumulate_scalar(g_master_location, loss);
+	if (g_distributed)
+		loss = accumulate_scalar(g_master_location, loss);
 
 	for (int i = 0; i < g_example_count; i++) {
 	
@@ -713,6 +716,9 @@ double get_loss(float alpha, float *reg_value)
 	for (int i = 0; i < g_feature_count; i++) {
 		loss += g_lambda_1 * fabs((1 - alpha) * g_beta[i] + alpha * g_beta_new[i]);
 	}
+
+	if (g_distributed)
+		loss = accumulate_scalar(g_master_location, loss);
 
 	if (reg_value)
 		*reg_value = loss;
@@ -1373,11 +1379,15 @@ void combine_vectors(double loss, int type, float coeffs[], int random_count)
 
 		start_timer("combine vectors - data transfer");
 		accumulate_vector(g_master_location, g_betaTx_delta, g_example_count);
-		accumulate_vector(g_master_location, g_beta_new, g_feature_count);
+
+		if (false) {
+			accumulate_vector(g_master_location, g_beta_new, g_feature_count);
+
+			for (int i = 0; i < g_feature_count; i++)
+				g_beta_new[i] -= (global.total - 1) * g_beta[i];
+		}
+
 		stop_timer("combine vectors - data transfer");
-	
-		for (int i = 0; i < g_feature_count; i++)
-			g_beta_new[i] -= (global.total - 1) * g_beta[i];
 
 		return;
 	}
@@ -1577,8 +1587,10 @@ void save_sparse_beta(string filename, float *v)
 	FILE *file_rfeatures = fopen(filename.c_str(), "w");
 	float tolerance = 1.0e-6;
 
+	fprintf(file_rfeatures, "%d\n", g_feature_count);
+
 	for (int i = 1; i < g_feature_count; i++) {
-		if (fabs(v[i]) <= tolerance) {
+		if (fabs(v[i]) > tolerance) {
 			fprintf(file_rfeatures, "%d:%f\n", i, v[i]);
 		}
 	}
@@ -1756,7 +1768,7 @@ void get_feature_lambda(float *f_lambda)
 	}
 }
 
-void read_beta(bool distributed, const char *filename, float *g_beta, float* g_beta_new, double *g_exp_betaTx)
+void read_beta(const char *filename, float *g_beta, float* g_beta_new, double *g_exp_betaTx)
 {
 	float *betaTx = (float*)safe_calloc(g_example_count, sizeof(float));
 
@@ -1798,7 +1810,7 @@ void read_beta(bool distributed, const char *filename, float *g_beta, float* g_b
 		}
 	}
 
-	if (distributed) {
+	if (g_distributed) {
 		accumulate_vector(g_master_location, betaTx, g_example_count);
 	}
 
@@ -1826,10 +1838,9 @@ void print_iter_stat(IterStat iter_stat[], int iterations_done)
 
 }
 
-void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, string cache_filename, float termination_eps)
+void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map& vm, string cache_filename, float termination_eps)
 {
 	float beta_max = vm["beta-max"].as<float>();
-	bool distributed = !vm["server"].empty();
 	int combine_type = vm["combine-type"].as<int>();
 
 	float sum_coeffs[global.total];
@@ -1942,11 +1953,11 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 				sum_w_x_2 += w * x * x;
 				sum_w_q_x += w * q * x;
 
-				if (isnan(sum_w_x_2) || isnan(sum_w_q_x)) {
+				/*if (isnan(sum_w_x_2) || isnan(sum_w_q_x)) {
 					cout << "NaN! feature_id = " << feature_id << " sum_w_q_x = " << sum_w_q_x << " wum_w_x_2 = " << sum_w_x_2 << " w  = " << w  << " q = " << q << " x = " << x;
 					cout << " p = " << p << " exp_example_betaTx = " << exp_example_betaTx << endl;
 					return;
-				} 
+				}*/
 
 				subgrad[feature_id] += - y * x / (1.0 + exp_y_example_betaTx);
 				
@@ -1959,10 +1970,10 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 			update_feature(sum_w_q_x, sum_w_x_2, beta_max, feature_id, shrinkage, shrinkage_max,
 					vm["beta-min"].as<float>(), vm["zero-max-shrinkage"].as<int>(), f_lambda);
 
-			if (isnan(g_beta_new[feature_id])) {
+			/*if (isnan(g_beta_new[feature_id])) {
 				cout << "NaN! feature_id = " << feature_id << " sum_w_q_x = " << sum_w_q_x << " wum_w_x_2 = " << sum_w_x_2 << " beta_max = " << beta_max << endl;
 				return;
-			} 
+			} */
 		}
 
 		stop_timer("iterations");
@@ -1977,7 +1988,7 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 		printf("\n");	
 		printf("Local ||beta - beta_new|| = %e\n", delta_norm(g_beta, g_beta_new, g_feature_count));
 		feature_t bad_coord = get_bad_coordinates(beta_max);
-		if (distributed) {
+		if (g_distributed) {
 			printf("bad coordinates %ld\n", (ulong)bad_coord);
 			iter_stat[iter].global_bad_coord = (feature_t)(accumulate_scalar(g_master_location, bad_coord) + 0.5);
 		}
@@ -1986,7 +1997,7 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 		//
 		// Accumulate deltas of beta
 		//
-		if (distributed) {
+		if (g_distributed) {
 			if (vm["sync"].as<int>()) sync_nodes();
 
 			//start_timer("deltas combination");
@@ -2023,7 +2034,7 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 			subgrad_norm_local += SQUARE(subgrad[i]);
 		}
 	
-		if (distributed) {
+		if (g_distributed) {
 			subgrad_norm = accumulate_scalar(g_master_location, subgrad_norm_local);
 		}
 		else {	
@@ -2172,7 +2183,7 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 		if (vm.count("save-per-iter") && !vm["final-regressor"].empty()) {
 			string filename = vm["final-regressor"].as<string>() + string(".") + to_string(lambda_idx, "%03d") + string(".") + to_string(iter, "%03d");
 			cout << "saving regressor into " << filename << endl;
-			save_beta(filename);
+			save_sparse_beta(filename, g_beta);
 		}
 
 		if (make_newton && stop) {
@@ -2221,17 +2232,16 @@ void optimize(int iterations_max, int lambda_idx, const po::variables_map& vm, s
 	print_time_summary();
 
 	if (!vm["final-regressor"].empty())
-		save_beta(vm["final-regressor"].as<string>());
+		save_sparse_beta(vm["final-regressor"].as<string>(), g_beta);
 
 	print_iter_stat(iter_stat, iterations_done);
 }
 
-int solve_problem(int iterations_max, const po::variables_map& vm, string cache_filename, float termination_eps, bool distributed, vector<float> lambda_1)
+int solve_reg_path_d_glmnet(int iterations_max, const po::variables_map& vm, string cache_filename, float termination_eps, vector<float> lambda_1)
 {
 	//
 	// Allocating important vectors
 	//
-	//g_betaTx = (float*)safe_calloc(g_example_count, sizeof(float));
 	g_exp_betaTx = (double*)safe_calloc(g_example_count, sizeof(double));
 	g_betaTx_delta = (float*)safe_calloc(g_example_count, sizeof(float));
 	g_beta = (float*)safe_calloc(g_feature_count, sizeof(float));
@@ -2245,7 +2255,7 @@ int solve_problem(int iterations_max, const po::variables_map& vm, string cache_
 	printf("avg y = %f\n", avg_y / g_example_count);
 
 	if (vm.count("initial-regressor")) {
-		read_beta(distributed, vm["initial-regressor"].as<string>().c_str(), g_beta, g_beta_new, g_exp_betaTx);	
+		read_beta(vm["initial-regressor"].as<string>().c_str(), g_beta, g_beta_new, g_exp_betaTx);	
 	}
 	else {		
 		//
@@ -2259,7 +2269,6 @@ int solve_problem(int iterations_max, const po::variables_map& vm, string cache_
 		}
 
 		for (int i = 0; i < g_example_count; i++) {
-			//g_betaTx[i] = bias;
 			g_exp_betaTx[i] = exp(bias);
 		}
 	}
@@ -2274,7 +2283,7 @@ int solve_problem(int iterations_max, const po::variables_map& vm, string cache_
 	if (vm.count("lambda-path")) {
 
 		get_feature_lambda(feature_lambda);
-		if (distributed) {
+		if (g_distributed) {
 			accumulate_vector(g_master_location, feature_lambda, g_feature_count);
 		}
 
@@ -2297,7 +2306,7 @@ int solve_problem(int iterations_max, const po::variables_map& vm, string cache_
 	//
 	for (int i = 0; i < lambda_1.size(); ++i) {
 		g_lambda_1 = lambda_1[i];
-		optimize(iterations_max, i, vm, cache_filename, termination_eps);
+		solve_d_glmnet(iterations_max, i, vm, cache_filename, termination_eps);
 	}
 
 	//
@@ -2324,7 +2333,7 @@ int solve_problem(int iterations_max, const po::variables_map& vm, string cache_
 int LOSS_SQUARED = 0;
 int LOSS_LOGISTIC = 1;
 
-int solve_admm(int iterations_max, const po::variables_map& vm, string cache_filename, float termination_eps, bool distributed, float lambda_1)
+int solve_admm(int iterations_max, const po::variables_map& vm, string cache_filename, float termination_eps, float lambda_1)
 {
 	IterStat iter_stat[iterations_max + 1];
 	memset(iter_stat, 0, sizeof(iter_stat));
@@ -2343,23 +2352,25 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 	float *Aixik = (float*)safe_calloc(g_example_count, sizeof(float));
 
 	float *subgrad = (float*)safe_calloc(g_feature_count, sizeof(float));
-	float x[g_feature_count];
+	//float x[g_feature_count];
 
 	float rho = vm["rho"].as<float>();
-	int N = (distributed ? global.total : 1);
+	int N = (g_distributed ? global.total : 1);
 
 	//
 	// fill lookup table
 	//
-	int lookup_size = 1000;
-	float max = 10.0;
-	vector<float> lookup(lookup_size);
+	/*int lookup_size = 10000;
+	float max = 100.0;
+	vector<float> lookup_c(lookup_size);
+	vector<float> lookup_x(lookup_size);
 				
 	for (int i = 0; i < lookup_size; ++i) {
 		double a = rho / N;
-		double c = -max * N * (i * 2 - lookup) / (float)lookup_size;
-		lookup[i] = solve_one_dim_log_reg(0, a, c);
-	}
+		double c = max * N * (i * 2 - lookup_size) / (float)lookup_size;
+		lookup_c[i] = c;
+		lookup_x[i] = solve_one_dim_log_reg(0, a, c);
+	}*/
 
 	for (int iter = 1; iter <= iterations_max; iter++) {
 		
@@ -2387,6 +2398,7 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 
 				double sum_1 = 0.0, sum_2 = 0.0;
 				subgrad[feature_id] = 0.0;
+				int examples_feature = 0;
 				double t = 0.0;
 
 				while (g_cache.ReadLine(&example_id, &a, &y, NULL)) {
@@ -2405,6 +2417,8 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 					else {
 						subgrad[feature_id] += y * a / (1.0 + exp(y * Ax_example_id));
 					}
+
+					examples_feature++;
 				}
 			
 				float x_new = (sum_2 > 0 ? soft_threshold(sum_1, lambda_1 / rho) / sum_2 : 0.0);
@@ -2420,33 +2434,33 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 			if (distributed) {
 				accumulate_vector(g_master_location, Ax_copy, g_example_count);
 			}*/
-
-			double subgrad_local_norm = square_norm(subgrad, g_feature_count);
-			float subgrad_norm = subgrad_local_norm;
-
-			if (distributed) {
-				subgrad_norm = sqrt(accumulate_scalar(g_master_location, SQUARE(subgrad_local_norm)));
-			}
-			
-			iter_stat[iter].loss = get_logistic_loss_admm(g_cache.GetY(), Ax_copy, xk);
-			iter_stat[iter].subgrad_norm = subgrad_norm;
-			iter_stat[iter].full_time = get_full_time();
-
-			cout << "loss = " << iter_stat[iter].loss << endl;
-			cout << "subgrad =" << subgrad_norm << endl;
 		}
 
 		memcpy(Aixik, Ax, g_example_count * sizeof(float));
 		memcpy(Axk, Ax, g_example_count * sizeof(float));
 
-		if (distributed) {
+		if (g_distributed) {
 			accumulate_vector(g_master_location, Axk, g_example_count);
 		}
+
+		double subgrad_local_norm = square_norm(subgrad, g_feature_count);
+		float subgrad_norm = subgrad_local_norm;
+
+		if (g_distributed) {
+			subgrad_norm = sqrt(accumulate_scalar(g_master_location, SQUARE(subgrad_local_norm)));
+		}
+			
+		iter_stat[iter].loss = get_logistic_loss_admm(g_cache.GetY(), Axk, xk);
+		iter_stat[iter].subgrad_norm = subgrad_norm;
+		iter_stat[iter].full_time = get_full_time();
+
+		cout << "loss = " << iter_stat[iter].loss << endl;
+		cout << "subgrad =" << subgrad_norm << endl;
 
 		float alpha = 1.0;
 
 		for (example_t i = 0; i < g_example_count; ++i) {
-			int N = (distributed ? global.total : 1);
+			int N = (g_distributed ? global.total : 1);
 
 			Axk[i] /= N;
 			float Axk_hat = alpha * Axk[i] + (1 - alpha) * zk[i];
@@ -2459,26 +2473,27 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 				double c = g_all_y[i] * N *(Axk_hat + uk[i]);
 
 				//
-				// argmin_{x} (sigmoid(x) + a/2 * (x - c)^2)
+				// argmin_{x} (logistic(x) + a/2 * (x - c)^2)
 				//
-				double x = approx_bsearch(lookup, c);
-				x = solve_one_dim_log_reg(x, a, c, 1);
+				/*int pos = approx_bsearch(lookup_c, c);
+				double x = lookup_x[pos];*/
+				double x = solve_one_dim_log_reg(x, a, c, 10);
 
-				zk[i] = g_all_y[i] * x / N
+				zk[i] = g_all_y[i] * x / N;
 			}
 
-			uk[i] = uk[i] + Axk[i] - zk[i]
+			uk[i] = uk[i] + Axk[i] - zk[i];
 		}
 
 		if (vm.count("save-per-iter") && !vm["final-regressor"].empty()) {
-			int lambda_idx = 0
-			string filename = vm["final-regressor"].as<string>() + string(".") + to_string(lambda_idx, "%03d") + string(".") + to_string(iter, "%03d")
+			int lambda_idx = 0;
+			string filename = vm["final-regressor"].as<string>() + string(".") + to_string(lambda_idx, "%03d") + string(".") + to_string(iter, "%03d");
 			cout << "saving regressor into " << filename << endl;
 
 			//memcpy(x, xk, sizeof(float) * g_feature_count);
 			//accumulate_vector(g_master_location, x, g_feature_count);
 
-			save_sparse_beta(filename, x);
+			save_sparse_beta(filename, xk);
 		}
 
 		stop_timer("iterations");
@@ -2494,8 +2509,11 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 	safe_free(subgrad);
 
 	if (!vm["final-regressor"].empty())
-		save_beta(vm["final-regressor"].as<string>(), x);
+		save_beta(vm["final-regressor"].as<string>(), xk);
 
+	printf("\n");	
+	print_time_summary();
+	printf("\n");	
 	print_iter_stat(iter_stat, iterations_max);
 }
 
@@ -2564,12 +2582,12 @@ int main(int argc, char **argv)
 	string dataset_filename = vm["dataset"].as<string>();
 	vector<float> lambda_1 = vm["lambda-1"].as<vector<float> >();
 	int iterations_max = vm["iterations"].as<int>();
-	bool distributed = !vm["server"].empty();
+	g_distributed = !vm["server"].empty();
 	float termination_eps = vm["termination"].as<float>();
 
 	extern global_data global;
 
-	if (distributed) {
+	if (g_distributed) {
 		g_master_location = vm["server"].as<string>();
 		global.unique_id = vm["unique-id"].as<int>();
 		global.node = vm["node"].as<int>();
@@ -2599,7 +2617,7 @@ int main(int argc, char **argv)
 	printf("debug: max_feature_id %ld\n", (ulong)max_feature_id);
 	printf("debug: max_example_id %ld\n", (ulong)max_example_id);
 
-	if (distributed) {
+	if (g_distributed) {
 		if (vm["sync"].as<int>()) sync_nodes();
 
 		start_timer("sync dataset info");
@@ -2625,7 +2643,7 @@ int main(int argc, char **argv)
 	printf("back search      = %d\n", !vm.count("no-back-search"));
 	printf("loss             = %d\n", vm["loss"].as<int>());
 
-	if (distributed) {
+	if (g_distributed) {
 		printf("server = %s\n", g_master_location.c_str());
 		printf("node = %ld\n", global.node);
 		printf("total = %ld\n", global.total);
@@ -2641,11 +2659,11 @@ int main(int argc, char **argv)
 	int ret;
 
 	if (!vm.count("admm")) {
-		ret = solve_problem(iterations_max, vm, cache_filename, termination_eps, distributed, lambda_1);
+		ret = solve_reg_path_d_glmnet(iterations_max, vm, cache_filename, termination_eps, lambda_1);
 	}
 	else {
 		g_lambda_1 = lambda_1[0];
-		ret = solve_admm(iterations_max, vm, cache_filename, termination_eps, distributed, lambda_1[0]);
+		ret = solve_admm(iterations_max, vm, cache_filename, termination_eps, lambda_1[0]);
 	}
 		
 	return ret; 
