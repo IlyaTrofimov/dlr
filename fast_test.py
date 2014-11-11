@@ -7,10 +7,10 @@ def execute(cmd):
 	print cmd
 	os.system(cmd)
 
-if __name__ == '__main__':
-	execute('./dlr -d small_train_ro_0.1.ii2 --iterations 100 --termination 0.0 --lambda-1 16 -f tmp_model --last-iter-sum --linear-search 1 -l small_train_ro_0.1.label --sparse-model 1 --async-cycle')
-	#execute('./dlr -d small_train_ro_0.1.ii2 --iterations 10 --termination 0.0 --lambda-1 16 -f tmp_model --last-iter-sum --linear-search 1 -l small_train_ro_0.1.label --sparse-model 1')
-	file1 = open('ethalon_model_sparse', 'r')
+def fast_test(cmd, ethalon_filename, tolerance = 1.0e-4, head = 0):
+
+	execute(cmd)
+	file1 = open(ethalon_filename, 'r')
 	file2 = open('tmp_model', 'r')
 
 	for k in xrange(2):
@@ -18,8 +18,6 @@ if __name__ == '__main__':
 		line2 = file2.readline()
 
 	while (line1 and line2):
-
-		tolerance = 1.0e-4
 
 		idx1, value1 = line1.split(":")
 		idx2, value2 = line2.split(":")
@@ -29,12 +27,31 @@ if __name__ == '__main__':
 
 		if idx1 != idx2 or (abs(float(value1) - float(value2)) > tolerance):
 			print 'ERROR', line1, line2
-			execute('vimdiff ethalon_model_sparse tmp_model')
+			execute('vimdiff %s tmp_model' % ethalon_filename)
 			sys.exit()
+
+		if head > 0 and (idx1 > head or idx2 > head):
+			break
 
 		line1 = file1.readline().strip()
 		line2 = file2.readline().strip()
 
 	print 'OK!'
 
+if __name__ == '__main__':
+
+	execute('gunzip small_train_ro_0.1.ii2.gz -c > small_train_ro_0.1.ii2')
+
+	print 'Testing d-GLMNET, async'
+	fast_test('./dlr -d small_train_ro_0.1.ii2 --iterations 10 --termination 0.0 --lambda-1 16 -f tmp_model --last-iter-sum --linear-search 1 -l small_train_ro_0.1.label --sparse-model 1 --async-cycle 1',
+			'ethalon_model_sparse', tolerance = 1.0e-2, head = 50)
+
+	print 'Testing d-GLMNET, sync'
+	fast_test('./dlr -d small_train_ro_0.1.ii2 --iterations 10 --termination 0.0 --lambda-1 16 -f tmp_model --last-iter-sum --linear-search 1 -l small_train_ro_0.1.label --sparse-model 1 --async-cycle 0',
+			'ethalon_model_sparse')
 	
+	print 'Testing ADMM'
+	fast_test('./dlr -d small_train_ro_0.1.ii2 --iterations 10 --termination 0.0 --lambda-1 16 -f tmp_model --admm --rho 1 --loss 1 -l small_train_ro_0.1.label --sparse-model 1', 
+			'ethalon_model_admm')
+
+
