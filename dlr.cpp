@@ -12,6 +12,8 @@
 #include<algorithm>
 #include<sys/stat.h>
 #include<algorithm>
+#include<thread>
+#include<chrono>
 #include "asa047.h"
 
 #include "accumulate.h"
@@ -849,10 +851,12 @@ void update_feature(float sum_w_q_x, float sum_w_x_2, float beta_max, feature_t 
 	if (fabs(beta_after_cd) < beta_min)
 		beta_after_cd = 0.0;
 
-	g_cache.MoveToStartVariable();
-	update_betaTx(beta_after_cd - beta);
+	if (beta_after_cd != beta) {
+		g_cache.MoveToStartVariable();
+		update_betaTx(beta_after_cd - beta);
 
-	g_beta_new[feature_id] = beta_after_cd;
+		g_beta_new[feature_id] = beta_after_cd;
+	}
 }
 
 void update_feature_admm(float delta_beta, float *Aixik)
@@ -1838,6 +1842,136 @@ void print_iter_stat(IterStat iter_stat[], int iterations_done)
 
 }
 
+std::mutex g_mutex;
+int g_coord_cycle_completed = 0;;
+int g_should_break_cycle = 0;
+float PART_FINISHED = 0.75;
+
+void check_completed_cycles() 
+{
+	while(true) {
+		int nodes_finished = 0;
+		
+		if (g_distributed) {
+			std::lock_guard<std::mutex> lock(g_mutex); 	
+			nodes_finished = (int)accumulate_scalar(g_master_location, (double)g_coord_cycle_completed);
+		
+			g_should_break_cycle = (int)(nodes_finished >= (int)(PART_FINISHED * global.total));
+		}
+		else {
+			g_should_break_cycle = g_coord_cycle_completed;
+		}	
+
+		if (g_should_break_cycle) {
+			cout << "nodes_finished " << nodes_finished << " g_coord_cycle_completed " << g_coord_cycle_completed  << " g_should_break_cycle " << g_should_break_cycle << endl;
+			break;
+		}
+		else {
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		}
+	}	
+}
+
+void solve_quadratic(const po::variables_map& vm, bool active_feature_iter, float shrinkage_max, feature_t* feature_idx, float *subgrad, vector<char>* active)
+{
+	printf("starting from feature_idx %d\n", *feature_idx);
+
+	float beta_max = vm["beta-max"].as<float>();
+	float shrinkage = vm["initial-shrinkage"].as<float>();
+	
+	feature_t processed_features = 0;
+	int lines_processed = 0;
+	memset(subgrad, 0, g_feature_count * sizeof(float));
+
+	if (!active_feature_iter) {
+		fill(active->begin(), active->end(), 1);
+		//prev_qloss = get_qloss();
+	}
+		
+	g_coord_cycle_completed = 0;;
+	g_should_break_cycle = 0;
+	std::thread thread_check(check_completed_cycles);
+
+	if (*feature_idx == 0)
+		g_cache.Rewind();
+
+	while (true) {
+	
+		feature_t feature_id = g_cache.GetFeatureId(*feature_idx);
+
+		if (active->at(feature_id)) {
+			g_cache.MoveToVar(feature_id);
+			processed_features++;
+
+			g_cache.ReadVariable(&feature_id);
+
+			example_t example_id;
+			int y;
+			float weight, x;
+
+			double sum_w_x_2 = 0.0;
+			double sum_w_q_x = 0.0;
+
+			while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
+
+				double exp_example_betaTx = g_exp_betaTx[example_id];
+
+				double exp_y_example_betaTx = (y == 1 ? exp_example_betaTx : 1.0 / exp_example_betaTx); 
+				double p = exp_example_betaTx / (1.0 + exp_example_betaTx);
+
+				p = LIMIT(p, P_MIN, P_MAX);
+
+				float w = p * (1 - p);
+				int y01 = (y + 1) / 2;
+
+				float q = (y01 - p) / w - (g_betaTx_delta[example_id] - g_beta_new[feature_id] * x);
+	
+				sum_w_x_2 += w * x * x;
+				sum_w_q_x += w * q * x;
+
+				subgrad[feature_id] += - y * x / (1.0 + exp_y_example_betaTx);
+					
+				lines_processed++;
+			}
+		
+			vector<float> *f_lambda = NULL;
+				
+			update_feature(sum_w_q_x, sum_w_x_2, beta_max, feature_id, shrinkage, shrinkage_max,
+					vm["beta-min"].as<float>(), vm["zero-max-shrinkage"].as<int>(), f_lambda);
+		}
+		
+		//cout << feature_id << " " << g_coord_cycle_completed << " " << g_should_break_cycle << " " << g_beta_new[feature_id] << endl;
+			
+		(*feature_idx)++;
+
+		//if (processed_features % 100 == 0)
+		//	g_coord_cycle_completed = 1;
+
+		if (*feature_idx == g_cache.GetCacheFeatureCount()) {
+			*feature_idx = 0;
+			g_cache.Rewind();
+
+			g_coord_cycle_completed = 1;
+		}			
+
+		if (vm.count("async-cycle") > 0) {
+			if (g_should_break_cycle) {
+				printf("breaking, async mode on, done %.1f%%\n,  coord_cycle_completed = \n", 100 * (float)processed_features / g_cache.GetCacheFeatureCount(), g_coord_cycle_completed);			
+				break;	
+			}
+		}
+		else {
+			if (g_coord_cycle_completed)
+				break;			
+		}
+	}
+
+	printf("processed features total %d\n", processed_features);
+	printf("lines processed %d\n", lines_processed);
+
+	thread_check.join();
+}
+
 void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map& vm, string cache_filename, float termination_eps)
 {
 	float beta_max = vm["beta-max"].as<float>();
@@ -1858,14 +1992,13 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 	memset(iter_stat, 0, sizeof(iter_stat));
 	iter_stat[0].loss = prev_loss;
 	iter_stat[0].time = 0;
-//	iter_stat[0].subgrad_norm_local = get_grad_norm_exact(cache_filename.c_str());
 	iter_stat[0].subgrad_norm_local = 0.0;
 
+	vector<char> active(g_feature_count, 1);
 	int active_feature_iter = 0;
 	int active_count = 0;
 	int cd_count = 0;
-
-	vector<char> active(g_feature_count, 1);
+	feature_t feature_idx = 0;
 
 	float *subgrad = (float*)safe_calloc(g_feature_count, sizeof(float));
 	int iterations_done;
@@ -1900,89 +2033,15 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 		}
 
 		cout << "min_exp_betaTx = " << min_exp_betaTx << " max_exp_betaTx = " << max_exp_betaTx << endl;
-		/* */
 
-		feature_t processed_features = 0;
-		int lines_processed = 0;
-		memset(subgrad, 0, g_feature_count * sizeof(float));
-
-		if (!active_feature_iter) {
-			fill(active.begin(), active.end(), 1);
-			prev_qloss = get_qloss();
-		}
-
-		g_cache.Rewind();
-
-		for (feature_t feature_idx = 0; feature_idx < g_cache.GetCacheFeatureCount(); ++feature_idx) {
-
-			feature_t feature_id = g_cache.GetFeatureId(feature_idx);
-
-			if (!active[feature_id]) {
-				continue;
-			}
-			else {
-				g_cache.MoveToVar(feature_id);
-				processed_features++;
-			}
-
-			g_cache.ReadVariable(&feature_id);
-
-			example_t example_id;
-			int y;
-			float weight, x;
-
-			double sum_w_x_2 = 0.0;
-			double sum_w_q_x = 0.0;
-
-			while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
-
-				double exp_example_betaTx = g_exp_betaTx[example_id];
-
-				double exp_y_example_betaTx = (y == 1 ? exp_example_betaTx : 1.0 / exp_example_betaTx); 
-				double p = exp_example_betaTx / (1.0 + exp_example_betaTx);
-
-				p = LIMIT(p, P_MIN, P_MAX);
-
-				float w = p * (1 - p);
-				int y01 = (y + 1) / 2;
-				//float z = example_betaTx + (y01 - p) / w;
-				//float q = z - (example_betaTx + betaTx_delta[example_id] - beta_new[feature_id] * x);
-
-				float q = (y01 - p) / w - (g_betaTx_delta[example_id] - g_beta_new[feature_id] * x);
-
-				sum_w_x_2 += w * x * x;
-				sum_w_q_x += w * q * x;
-
-				/*if (isnan(sum_w_x_2) || isnan(sum_w_q_x)) {
-					cout << "NaN! feature_id = " << feature_id << " sum_w_q_x = " << sum_w_q_x << " wum_w_x_2 = " << sum_w_x_2 << " w  = " << w  << " q = " << q << " x = " << x;
-					cout << " p = " << p << " exp_example_betaTx = " << exp_example_betaTx << endl;
-					return;
-				}*/
-
-				subgrad[feature_id] += - y * x / (1.0 + exp_y_example_betaTx);
-				
-				lines_processed++;
-			}
-		
-			//vector<float> *f_lambda = ((iter == 1) ? &feature_lambda : NULL);
-			vector<float> *f_lambda = NULL;
-				
-			update_feature(sum_w_q_x, sum_w_x_2, beta_max, feature_id, shrinkage, shrinkage_max,
-					vm["beta-min"].as<float>(), vm["zero-max-shrinkage"].as<int>(), f_lambda);
-
-			/*if (isnan(g_beta_new[feature_id])) {
-				cout << "NaN! feature_id = " << feature_id << " sum_w_q_x = " << sum_w_q_x << " wum_w_x_2 = " << sum_w_x_2 << " beta_max = " << beta_max << endl;
-				return;
-			} */
-		}
-
+		//
+		// Solve L1-regularized quadratic approximation
+		//	
+		solve_quadratic(vm, active_feature_iter, shrinkage_max, &feature_idx, subgrad, &active);
 		stop_timer("iterations");
 
 		double min_loss;
 		float best_alpha;
-	
-		printf("processed features total %d\n", processed_features);
-		printf("lines processed %d\n", lines_processed);
 
 		start_timer("debug: calc bad coordinates");
 		printf("\n");	
@@ -2159,15 +2218,7 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 		//
 		if (make_newton) {
 			for (int i = 0; i < g_example_count; i++) {
-				//g_betaTx[i] += best_alpha * g_betaTx_delta[i];
-				//g_betaTx[i] = LIMIT(g_betaTx[i], -MAX_betaTx, MAX_betaTx);
-				//g_exp_betaTx[i] = exp(g_betaTx[i]);
-
 				g_exp_betaTx[i] *= exp(best_alpha * g_betaTx_delta[i]);
-			
-				//if (std::fpclassify (g_exp_betaTx[i]) == FP_INFINITE)
-				//	g_exp_betaTx[i] = 1.0e20;
-			
 				g_betaTx_delta[i] = 0.0;
 			}
 
@@ -2231,8 +2282,12 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 	printf("\n");	
 	print_time_summary();
 
-	if (!vm["final-regressor"].empty())
-		save_sparse_beta(vm["final-regressor"].as<string>(), g_beta);
+	if (!vm["final-regressor"].empty()) {
+		if (vm["sparse-model"].as<int>())
+			save_sparse_beta(vm["final-regressor"].as<string>(), g_beta);
+		else
+			save_beta(vm["final-regressor"].as<string>());
+	}
 
 	print_iter_stat(iter_stat, iterations_done);
 }
@@ -2549,6 +2604,8 @@ int main(int argc, char **argv)
 		("linear-search", "make accurate linear search")
 		("find-bias", "initial finding bias")
 		("last-iter-sum", "add all differences at last iteration")
+		("sparse-model", po::value<int>()->default_value(1), "sparse model file")
+		("async-cycle", "asynchronous cycle")
 		;
 
 	po::options_description admm_desc("ADMM options");
@@ -2592,6 +2649,9 @@ int main(int argc, char **argv)
 		global.unique_id = vm["unique-id"].as<int>();
 		global.node = vm["node"].as<int>();
 		global.total = vm["total"].as<int>();
+	}
+	else {
+		global.total = 1;
 	}
 
 	//

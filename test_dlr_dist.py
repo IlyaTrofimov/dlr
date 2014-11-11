@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import os
 import sys
+import random
 
 from marina.base_metrics import get_metrics
 
@@ -105,6 +106,7 @@ def local_dist_run(train_file, label_file, test_file, jobcount, features, dump_d
 #		model_file = '%s/rfeatures_%d' % (dump_dir, nodes)
 		pred_file = 'tmp_pred'
 		cmd = ''
+		unique_id = random.randint(0, 100000)
 
 		for i in xrange(nodes):
 			if nodes == 1:
@@ -119,8 +121,8 @@ def local_dist_run(train_file, label_file, test_file, jobcount, features, dump_d
 				else:
 					model_file = ''
 
-				cmd += '(sleep % 2d; ./dlr -d %s -l %s %s %s --server %s --node %d --total %d --unique-id 10 1> %s/%d_%d.log 2>&1)' \
-						% (i + 1, train_file_part, label_file, model_file, features, server, i, nodes, dump_dir, i, nodes)
+				cmd += '(sleep % 2d; ./dlr -d %s -l %s %s %s --server %s --node %d --total %d --unique-id %d 1> %s/%d_%d.log 2>&1)' \
+						% (i + 1, train_file_part, label_file, model_file, features, server, i, nodes, unique_id, dump_dir, i, nodes)
 
 
 				if i < nodes - 1:
@@ -146,4 +148,4 @@ def local_dist_run(train_file, label_file, test_file, jobcount, features, dump_d
 
 if __name__ == '__main__':
 
-	local_dist_run('small_train_ro_0.1.ii2', 'small_train_ro_0.1.label', 'small_test_ro_0.1.svm', 3, '--lambda-1 64.0 --save-per-iter 1 --linear-search 1 --combine-type 0', 'admm_dump')
+	local_dist_run('small_train_ro_0.1.ii2', 'small_train_ro_0.1.label', 'small_test_ro_0.1.svm', 3, '--iterations 100 --termination 0.0 --lambda-1 16.0 --save-per-iter 1 --linear-search 1 --combine-type 0 --async-cycle', 'dglmnet')
