@@ -142,9 +142,9 @@ if __name__ == '__main__':
 	epsilon_task['params']['linear-search'] = 1;
 	epsilon_task['params']['last-iter-sum'] = 1;
 
-	epsilon_task['params']['admm'] = 1
-	epsilon_task['params']['rho'] = 1
-	epsilon_task['params']['loss'] = 1
+#	epsilon_task['params']['admm'] = 1
+#	epsilon_task['params']['rho'] = 1
+#	epsilon_task['params']['loss'] = 1
 
 
 #----------------------------------------------------
@@ -152,9 +152,9 @@ if __name__ == '__main__':
 #----------------------------------------------------
 #
 	base_task = {
-		'train_tables':		'users/trofim/genkin/webspam.train.ii2',
-		'label_table':		'users/trofim/genkin/webspam.train.label',
-		'test_file':		'~/dlr_data/webspam_wc_normalized_trigram.test',
+                'train_tables':         'dlr/data/webspam.train.ii2', 
+                'label_table':          'dlr/data/webspam.train.label',
+                'test_file':            '/home/trofim/dlr_data/webspam_wc_normalized_trigram.test',
 		'jobcount':		16,
 		'params': {
 			'iterations':		100,
@@ -226,7 +226,7 @@ if __name__ == '__main__':
 		'jobcount':		3,
 		'params': {
 			'iterations':		32,
-			'lambda-1':		64.0,
+			'lambda-1':		16.0,
 			'termination':		1.0e-6,
 			'combine-type':		0,
 			'save-per-iter':	1,
@@ -238,11 +238,12 @@ if __name__ == '__main__':
 		}
 
 	test_task = deepcopy(base_task)
-	test_task['params']['admm'] = 1
-	test_task['params']['rho'] = 1
-	test_task['params']['loss'] = 1
+	test_task['params']['async-cycle'] = 1
+#	test_task['params']['admm'] = 1
+#	test_task['params']['rho'] = 1
+#	test_task['params']['loss'] = 1
 
-#	tasks.append(epsilon_task)
+#	tasks.append(test_task)
 
 #	parent_dir = '/mnt/raid/home/trofim/dlr/meta-dump-20140926/'
 #	dumps = ['dump-20140925-0', 'dump-20140925-1', 'dump-20140925-2', 'dump-20140925-3', 'dump-20140925-4', 'dump-20140926-0', 'dump-20140926-1', 'dump-20140926-2']
@@ -250,9 +251,19 @@ if __name__ == '__main__':
 #	for dump in dumps:
 #		create_reports(a_dump_dir = parent_dir + dump, task = None, calc_metrics = False)
 
-	for i in [2, 4]:
-		epsilon_task['params']['rho'] = 2 ** i;
-		tasks.append(deepcopy(epsilon_task))
+#	for i in [2, 4]:
+#		epsilon_task['params']['rho'] = 2 ** i;
+#		tasks.append(deepcopy(epsilon_task))
+
+#	for i in range(10):
+		#epsilon_task['params']['async-cycle'] = i % 2;
+#		epsilon_task['params']['admm'] = 1
+#		epsilon_task['params']['rho'] = 1
+#		epsilon_task['params']['loss'] = 1
+
+#		tasks.append(deepcopy(epsilon_task))
+
+	tasks.append(deepcopy(webspam_task))
 
 #	create_reports('./dump-20141023-9', None)
 

@@ -35,11 +35,11 @@ def create_reducer(jobcount, features, head = False, initial = None, out_dir = N
 
 	if head:
 		reducer = '''
-more | head -n 1000 > train;
+cat | head -n 1000 > train;
 '''
 	else:
 		reducer = '''
-more > train;
+cat > train;
 '''
 	if initial:
 		reducer += '''
@@ -52,25 +52,22 @@ reducer_id=`echo $mapreduce_task_id | cut -d "_" -f 5`;
 mapred_job_id=`echo "$mapreduce_job_id" | awk -F "_" '{print $NF}'`;
 output_dir=$mapreduce_output_fileoutputformat_outputdir;
 
-echo $reducer_id;
-echo $nreducers;
-echo $mapred_job_id;
+echo $reducer_id > /dev/stderr;
+echo $nreducers > /dev/stderr;
+echo $mapred_job_id > /dev/stderr;
 
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:.;
 gunzip -f label.tmp.gz;
 
-./dlr -d train -l label.tmp -f model FEATURES SERVER_PARAMS INITIAL 1> log 2>&1;
+uname -n > log;
+./dlr -d train -l label.tmp -f model FEATURES SERVER_PARAMS INITIAL 1>> log 2>&1;
 
-touch model_empty;
-tar cfz models.tar.gz *model*;
+if ls *model* 1> /dev/null 2>&1 ; then
+	tar cfz models.tar.gz *model*;
+fi;
 
-#if [ "$reducer_id" == '000000' ]; then
-#	hdfs dfs -put -f log $output_dir;
-#	hdfs dfs -put -f models.tar.gz $output_dir;
-#fi;
-
-hdfs dfs -put -f log $output_dir/$reducer_id.log;
 hdfs dfs -put -f models.tar.gz $output_dir/$reducer_id.models.tar.gz;
+hdfs dfs -put -f log $output_dir/$reducer_id.log;
 '''
 
 	SERVER_PARAMS = '--server HOST --total $nreducers --unique-id $mapred_job_id --node $reducer_id'
@@ -109,7 +106,7 @@ def train_dlr(src_tables, label_table, jobcount, features, model, debug = 'debug
 
 	reducer_file = '%d.sh' % randint(0, 1000000)
 
-#	reducer = '/bin/more'
+#	reducer = '/bin/cat'
 
 	file = open('/tmp/%s' % reducer_file, 'w')
 	file.write(reducer)
@@ -131,12 +128,13 @@ hadoop jar /usr/lib/hadoop-mapreduce/hadoop-streaming.jar \
     -Dmapred.reduce.tasks=JOBCOUNT \
     -Dmapred.job.name="dlr allreduce" \
     -Dmapred.map.tasks.speculative.execution=true \
+    -Dmapred.reduce.tasks.speculative.execution=true \
     -Dmapred.child.java.opts="-Xmx100m" \
     -Dmapred.task.timeout=600000000 \
     -Dmapred.job.map.memory.mb=1000 \
     SRC_TABLES \
     -output OUT_DIR \
-    -mapper /bin/more \
+    -mapper /bin/cat \
     -reducer REDUCER \
     -file /tmp/REDUCER \
     -file dlr \
@@ -165,8 +163,19 @@ rm label.tmp.gz;
 	res = execute(script)
 
 	for i in xrange(jobcount):
-		execute('hdfs dfs -cat %s/%06d.models.tar.gz > %s/%06d.models.tar.gz' % (out_dir, i, dump_dir, i))
-		execute('hdfs dfs -cat %s/%06d.log > %s/%06d.log' % (out_dir, i, dump_dir, i))
+		log_table = '%s/%06d.log' % (out_dir, i)
+
+		if table_exists(log_table):
+			execute('hdfs dfs -cat %s > %s/%06d.log' % (log_table, dump_dir, i))
+		else:
+			return 0
+			
+		model_table = '%s/%06d.models.tar.gz' % (out_dir, i)
+
+		if table_exists(model_table):
+			execute('hdfs dfs -cat %s > %s/%06d.models.tar.gz' % (model_table, dump_dir, i))
+		else:
+			return 0
 
 	return res == 0
 

@@ -711,7 +711,7 @@ double get_logistic_loss_admm(int *all_y, float *betaTx, float *beta)
 }
 
 
-double get_loss(float alpha, float *reg_value)
+double get_loss(float alpha)
 {
 	double loss = 0.0;
 
@@ -722,8 +722,8 @@ double get_loss(float alpha, float *reg_value)
 	if (g_distributed)
 		loss = accumulate_scalar(g_master_location, loss);
 
-	if (reg_value)
-		*reg_value = loss;
+//	if (reg_value)
+//		*reg_value = loss;
 
 	for (int i = 0; i < g_example_count; i++) {
 	
@@ -731,15 +731,26 @@ double get_loss(float alpha, float *reg_value)
 //		loss += (log_odds < -100 ? log_odds : log(1.0 + exp(-log_odds)));
 
 		double exp_log_odds = (g_all_y[i] == -1 ? g_exp_betaTx[i] : 1.0 / g_exp_betaTx[i]);
-		exp_log_odds *= exp(-g_all_y[i] * alpha * g_betaTx_delta[i]);
+		double delta_log_odds = -g_all_y[i] * alpha * g_betaTx_delta[i];
 
-		loss += log(1.0 + exp_log_odds);
+
+		//if (exp_log_odds == std::numeric_limits<double>::infinity()) {
+		//	cout << "inf " << i << " " << g_exp_betaTx[i] << " " << g_betaTx_delta[i] << endl;
+		//}
+
+		if (delta_log_odds > 700) {
+			loss += log(exp_log_odds) + delta_log_odds;
+		}
+		else {
+			exp_log_odds *= exp(delta_log_odds);
+			loss += log(1.0 + exp_log_odds);
+		}
 	}
 
 	return loss;
 }
 
-void golden_section_search(double (*f)(float x), int count_max, float a0, float b0, float *xmin, double *fmin)
+void golden_section_search(double (*f)(float x), int count_max, float a0, float b0, float f_a0, float f_b0, float *xmin, double *fmin)
 {
 	float c = 0.3819;
 
@@ -798,20 +809,20 @@ void golden_section_search(double (*f)(float x), int count_max, float a0, float 
 	}
 
 	if (a == a0) {
-		f_a = f(a);
+		f_a = f_a0;
 
 		if (f_a < *fmin) {
 			*xmin = a;
-			*fmin = f(a);
+			*fmin = f_a;
 		}
 	}
 
 	if (b == b0) {
-		f_b = f(b);
+		f_b = f_b0;
 
 		if (f_b < *fmin) {
 			*xmin = b;
-			*fmin = f(b);
+			*fmin = f_b;
 		}
 	}
 
@@ -894,9 +905,9 @@ int file_exists(const char *filename)
 
 double f_alpha(float alpha) 
 { 
-	return get_loss(alpha, NULL);
+	cout << "calc f_alpha(" << alpha << ")" << endl;
+	return get_loss(alpha);
 }
-
 
 double get_combined_loss(double alpha[3]) {
 
@@ -1186,7 +1197,7 @@ void back_search(double zero_alpha_loss, float *best_alpha, double *min_loss, in
 		double zero_beta_loss = 0.0; //get_loss_exact(g_cache_filename.c_str(), example_count, feature_count, lambda_1, alpha, beta_zero, beta_zero);
 		//free(beta_zero);
 
-		double loss = get_loss(alpha, NULL);
+		double loss = get_loss(alpha);
 		if (count) (*count)++;
 
 		if (sum_loss && i == 0) {
@@ -1228,7 +1239,7 @@ void back_search_armijo(double zero_alpha_loss, float alpha_init, float *subgrad
 
 	for (int i = 0; i <= BACK_SEARCH_ARMIJO_MAX; i++) {
 		double alpha = alpha_init * pow(0.5, i);
-		double loss = get_loss(alpha, NULL);
+		double loss = get_loss(alpha);
 		if (count) (*count)++;
 		
 		int armijo_ok = (int)((loss - zero_alpha_loss) < (SIGMA * alpha * (subgrad_L_delta_beta + reg_value_new - reg_value)));
@@ -1584,7 +1595,7 @@ void save_beta(string filename, float *v)
 	fclose(file_rfeatures);
 	stop_timer("saving beta");
 }
-
+ 
 void save_sparse_beta(string filename, float *v)
 {
 	start_timer("saving beta");
@@ -1672,7 +1683,7 @@ double delta_norm(float *v1, float *v2, feature_t feature_count)
 double solve_one_dim_log_reg(double x, double a, double c, int steps_max = 10) 
 {
 	for (int i = 0; i < steps_max; ++i) {
-		double exp_x = exp(x);
+		double exp_x = (x < 700 ? exp(x) : exp(700));
 		double der1 = - 1.0 / (1.0 + exp_x) + a * (x - c);
 		double der2 = exp_x / (SQUARE(1 + exp_x)) + a;
 
@@ -1847,6 +1858,9 @@ int g_coord_cycle_completed = 0;;
 int g_should_break_cycle = 0;
 float PART_FINISHED = 0.75;
 
+/*************************************************************
+* 	Sets g_should_break_cycle ascynchr.
+*************************************************************/
 void check_completed_cycles() 
 {
 	while(true) {
@@ -1890,7 +1904,11 @@ void solve_quadratic(const po::variables_map& vm, bool active_feature_iter, floa
 		
 	g_coord_cycle_completed = 0;;
 	g_should_break_cycle = 0;
-	std::thread thread_check(check_completed_cycles);
+	std::thread thread_check;
+
+	if (vm["async-cycle"].as<int>()) {
+		thread_check = std::thread(check_completed_cycles);
+	}
 
 	if (*feature_idx == 0)
 		g_cache.Rewind();
@@ -1930,6 +1948,9 @@ void solve_quadratic(const po::variables_map& vm, bool active_feature_iter, floa
 				sum_w_q_x += w * q * x;
 
 				subgrad[feature_id] += - y * x / (1.0 + exp_y_example_betaTx);
+
+				//if (exp_example_betaTx > 1.0e6)
+				//	cout << example_id << " " << g_beta[feature_id] << " " << x << endl;
 					
 				lines_processed++;
 			}
@@ -1947,29 +1968,36 @@ void solve_quadratic(const po::variables_map& vm, bool active_feature_iter, floa
 		//if (processed_features % 100 == 0)
 		//	g_coord_cycle_completed = 1;
 
-		if (*feature_idx == g_cache.GetCacheFeatureCount()) {
-			*feature_idx = 0;
-			g_cache.Rewind();
+		if (vm["async-cycle"].as<int>()) {
+			if (processed_features * vm["async-count"].as<int>() >= g_cache.GetCacheFeatureCount()) {
+				g_coord_cycle_completed = 1;
+			}		
 
-			g_coord_cycle_completed = 1;
-		}			
+			if (*feature_idx == g_cache.GetCacheFeatureCount()) {
+				*feature_idx = 0;
+				g_cache.Rewind();
+			}
 
-		if (vm.count("async-cycle") > 0) {
 			if (g_should_break_cycle) {
-				printf("breaking, async mode on, done %.1f%%\n,  coord_cycle_completed = \n", 100 * (float)processed_features / g_cache.GetCacheFeatureCount(), g_coord_cycle_completed);			
+				printf("breaking, async mode on, done %.1f%%, coord_cycle_completed = %d\n", 100 * (float)processed_features / g_cache.GetCacheFeatureCount(), g_coord_cycle_completed);		
 				break;	
 			}
 		}
 		else {
-			if (g_coord_cycle_completed)
-				break;			
+			if (*feature_idx == g_cache.GetCacheFeatureCount()) {
+				*feature_idx = 0;
+				g_coord_cycle_completed = 1;
+				break;
+			}
 		}
 	}
 
 	printf("processed features total %d\n", processed_features);
 	printf("lines processed %d\n", lines_processed);
-
-	thread_check.join();
+		
+	if (vm["async-cycle"].as<int>()) {
+		thread_check.join();
+	}
 }
 
 void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map& vm, string cache_filename, float termination_eps)
@@ -1981,7 +2009,7 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 	memset(sum_coeffs, 0, sizeof(float) * global.total);
 	
 	double sum_loss;
-	double prev_loss = get_loss(0.0, NULL);
+	double prev_loss = get_loss(0.0);
 	printf("loss %f\n", prev_loss);
 	double prev_qloss = get_qloss();
 	printf("qloss %f\n", prev_qloss);
@@ -1999,6 +2027,7 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 	int active_count = 0;
 	int cd_count = 0;
 	feature_t feature_idx = 0;
+	float alpha_guess = 1.0;
 
 	float *subgrad = (float*)safe_calloc(g_feature_count, sizeof(float));
 	int iterations_done;
@@ -2038,6 +2067,17 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 		// Solve L1-regularized quadratic approximation
 		//	
 		solve_quadratic(vm, active_feature_iter, shrinkage_max, &feature_idx, subgrad, &active);
+
+		/* */
+		max_beta = g_beta_new[0];
+		min_beta = g_beta_new[0];
+
+		for (feature_t i = 0; i < g_feature_count; ++i) {
+			if (g_beta_new[i] > max_beta) max_beta = g_beta_new[i];
+			if (g_beta_new[i] < min_beta) min_beta = g_beta_new[i];
+		}
+		cout << "min_beta_new = " << min_beta << " max_beta_new = " << max_beta << endl;
+
 		stop_timer("iterations");
 
 		double min_loss;
@@ -2113,10 +2153,14 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 			start_timer("linear search");
 			printf("Testing combined delta:\n");
 
-			if (!vm.count("linear-search")) {
+			if (vm.count("ada-alpha")) {
+				back_search_armijo(prev_loss, alpha_guess, subgrad, &best_alpha, &min_loss, &(iter_stat[iter].back_search_count));
+				alpha_guess = std::min(best_alpha * 2, 1.0f);
+			}
+			else if (!vm.count("linear-search")) {
 				back_search_armijo(prev_loss, 1.0, subgrad, &best_alpha, &min_loss, &(iter_stat[iter].back_search_count));
 
-				sum_loss = get_loss(1.0, NULL);
+				sum_loss = get_loss(1.0);
 			}
 			else {
 				float xmin;
@@ -2134,7 +2178,7 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 					fmin = f_1;
 				}
 				else {
-					golden_section_search(f_alpha, 10, 0, 1, &xmin, &fmin);
+					golden_section_search(f_alpha, 10, 0, 1, f_0, f_1, &xmin, &fmin);
 				}
 
 				back_search_armijo(prev_loss, xmin, subgrad, &best_alpha, &min_loss, &(iter_stat[iter].back_search_count));
@@ -2160,7 +2204,7 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 		}
 		else {
 			best_alpha = 1.0;
-			min_loss = get_loss(1.0, NULL);
+			min_loss = get_loss(1.0);
 			sum_loss = min_loss;
 			iter_stat[iter].back_search_count = 0;			
 		}
@@ -2196,7 +2240,7 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 		//
 		// Update stats
 		//
-		double loss_new = get_loss(best_alpha, NULL);
+		double loss_new = get_loss(best_alpha);
 		double qloss_new = get_qloss();
 		double rel_loss_diff = ((loss_new - prev_loss) / prev_loss);
 		double rel_qloss_diff = ((qloss_new - prev_qloss) / prev_qloss);
@@ -2316,6 +2360,7 @@ int solve_reg_path_d_glmnet(int iterations_max, const po::variables_map& vm, str
 		//
 		// Find bias ?
 		//
+		start_timer("find bias");
 		float bias = 0.0;
 
 		if (vm.count("find-bias")) {
@@ -2326,6 +2371,7 @@ int solve_reg_path_d_glmnet(int iterations_max, const po::variables_map& vm, str
 		for (int i = 0; i < g_example_count; i++) {
 			g_exp_betaTx[i] = exp(bias);
 		}
+		stop_timer("find bias");
 	}
 
 	print_time();
@@ -2415,17 +2461,16 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 	//
 	// fill lookup table
 	//
-	/*int lookup_size = 10000;
-	float max = 100.0;
-	vector<float> lookup_c(lookup_size);
-	vector<float> lookup_x(lookup_size);
-				
+	int lookup_size = 10000;
+	float max = 1000.0;
+	vector<float> lookup(lookup_size);
+
 	for (int i = 0; i < lookup_size; ++i) {
 		double a = rho / N;
-		double c = max * N * (i * 2 - lookup_size) / (float)lookup_size;
-		lookup_c[i] = c;
-		lookup_x[i] = solve_one_dim_log_reg(0, a, c);
-	}*/
+		double c = 2 * i * max / lookup_size - max;
+
+		lookup[i] = solve_one_dim_log_reg(0, a, c);
+	}
 
 	for (int iter = 1; iter <= iterations_max; iter++) {
 		
@@ -2480,8 +2525,10 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 
 				subgrad[feature_id] = soft_threshold(subgrad[feature_id], lambda_1);
 
-				update_feature_admm(x_new - xk[feature_id], Ax);
-				xk[feature_id] = x_new;
+				if (x_new != xk[feature_id]) {
+					update_feature_admm(x_new - xk[feature_id], Ax);
+					xk[feature_id] = x_new;
+				}
 			}
 
 			/*memcpy(Ax_copy, Ax, g_example_count * sizeof(float));
@@ -2514,6 +2561,9 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 
 		float alpha = 1.0;
 
+		stop_timer("iterations");
+		start_timer("update z, u");
+
 		for (example_t i = 0; i < g_example_count; ++i) {
 			int N = (g_distributed ? global.total : 1);
 
@@ -2530,15 +2580,21 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 				//
 				// argmin_{x} (logistic(x) + a/2 * (x - c)^2)
 				//
-				/*int pos = approx_bsearch(lookup_c, c);
-				double x = lookup_x[pos];*/
-				double x = solve_one_dim_log_reg(x, a, c, 10);
+				int idx = lookup_size * (c + max) / (2 * max);
+				double x = lookup[idx];
+				x = solve_one_dim_log_reg(x, a, c, 2);
+				
+				//double x = solve_one_dim_log_reg(0.0, a, c, 10);
 
 				zk[i] = g_all_y[i] * x / N;
 			}
 
 			uk[i] = uk[i] + Axk[i] - zk[i];
 		}
+
+		stop_timer("update z, u");
+
+		printf("%f %F %f\n", xk[0], xk[1], xk[2]);
 
 		if (vm.count("save-per-iter") && !vm["final-regressor"].empty()) {
 			int lambda_idx = 0;
@@ -2550,9 +2606,16 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 
 			save_sparse_beta(filename, xk);
 		}
-
-		stop_timer("iterations");
 	}
+
+
+	if (!vm["final-regressor"].empty())
+		save_sparse_beta(vm["final-regressor"].as<string>(), xk);
+
+	printf("\n");	
+	print_time_summary();
+	printf("\n");	
+	print_iter_stat(iter_stat, iterations_max);
 
 	safe_free(xk);
 	safe_free(zk);
@@ -2562,14 +2625,6 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 	safe_free(Axk);
 	safe_free(Aixik);
 	safe_free(subgrad);
-
-	if (!vm["final-regressor"].empty())
-		save_beta(vm["final-regressor"].as<string>(), xk);
-
-	printf("\n");	
-	print_time_summary();
-	printf("\n");	
-	print_iter_stat(iter_stat, iterations_max);
 }
 
 int main(int argc, char **argv)
@@ -2596,6 +2651,7 @@ int main(int argc, char **argv)
 		("beta-min", po::value<float>()->default_value(0.0), "minimum absolute beta[i]")
 		("random-count", po::value<int>()->default_value(2), "number of deltas taken randomly")
 		("no-back-search", "don't make back search")
+		("ada-alpha", "use adative alpha")
 		("active", "use active features set")
 		("initial-shrinkage", po::value<float>()->default_value(1.0), "initial shrinkage value")
 		("increase-shrinkage", po::value<int>()->default_value(0), "increase shrinkage if alpha < 1.0")
@@ -2605,7 +2661,9 @@ int main(int argc, char **argv)
 		("find-bias", "initial finding bias")
 		("last-iter-sum", "add all differences at last iteration")
 		("sparse-model", po::value<int>()->default_value(1), "sparse model file")
-		("async-cycle", "asynchronous cycle")
+		("async-cycle", po::value<int>()->default_value(0), "asynchronous cycle")
+		("async-count", po::value<int>()->default_value(1), "times to synchronize per cycle over features")
+		("rm-dataset", "remove raw dataset")
 		;
 
 	po::options_description admm_desc("ADMM options");
@@ -2673,6 +2731,17 @@ int main(int argc, char **argv)
 
 	g_cache.Create(dataset_filename.c_str(), cache_filename.c_str(), &max_feature_id, &lines_count, &unique_features);
 	g_cache.ReadY(vm["labels"].as<string>().c_str(), &max_example_id);
+
+	if (vm.count("rm-dataset")) {
+		string cmd;
+		int res;
+
+		cmd = string("rm ") + vm["dataset"].as<string>();
+		res = system(cmd.c_str());
+
+		cmd = string("rm ") + vm["labels"].as<string>();
+		res = system(cmd.c_str());
+	}
 
 	printf("debug: max_feature_id %ld\n", (ulong)max_feature_id);
 	printf("debug: max_example_id %ld\n", (ulong)max_example_id);
