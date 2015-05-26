@@ -51,7 +51,7 @@ using std::to_string;
 //
 // Global variables 
 //
-//float *g_betaTx;
+float *g_betaTx;
 double *g_exp_betaTx;
 
 float *g_betaTx_delta;
@@ -61,6 +61,8 @@ float *g_beta_delta[3];
 feature_t g_example_count;
 example_t g_feature_count;
 float g_lambda_1;
+float g_lambda_2;
+float g_scad_a;
 int *g_all_y;
 bool g_distributed;
 
@@ -72,7 +74,6 @@ time_t g_time;
 string g_master_location;
 map<string, int> g_timers;
 map<string, int> g_start_timers;
-
 
 void print_time()
 {
@@ -560,7 +561,7 @@ double get_qloss()
 	double qloss = 0.0;
 
 	for (int i = 0; i < g_feature_count; i++) 
-		qloss += g_lambda_1 * fabs(g_beta_new[i]);
+		qloss += g_lambda_1 * fabs(g_beta_new[i]) + 0.5 * g_lambda_2 * SQUARE(g_beta_new[i]);
 	
 	for (int i = 0; i < g_example_count; i++) {
 		double exp_example_betaTx = g_exp_betaTx[i];
@@ -605,8 +606,10 @@ float* get_grad(const char *cache_filename)
 		}
 	}
 
-	for (int i = 0; i < g_feature_count; i++)
+	for (int i = 0; i < g_feature_count; i++) {
+		grad[i] += g_lambda_2 * g_beta[feature_id];
 		grad[i] = soft_threshold(grad[i], g_lambda_1);
+	}
 
 	safe_free(y_betaTx);
 
@@ -646,7 +649,8 @@ double get_loss_exact(const char *cache_filename, float alpha)
 	safe_free(y_betaTx);
 
 	for (int i = 0; i < g_feature_count; i++) {
-		loss += g_lambda_1 * fabs((1 - alpha) * g_beta[i] + alpha * g_beta_new[i]);
+		double coeff = (1 - alpha) * g_beta[i] + alpha * g_beta_new[i];
+		loss += g_lambda_1 * fabs(coeff) + 0.5 * g_lambda_2 * SQUARE(coeff);
 	}
 
 	stop_timer("debug: calc loss exact");
@@ -696,6 +700,7 @@ double get_logistic_loss_admm(int *all_y, float *betaTx, float *beta)
 
 	for (int i = 0; i < g_feature_count; i++) {
 		loss += g_lambda_1 * fabs(beta[i]);
+		loss += 0.5 * g_lambda_2 * SQUARE(beta[i]);
 	}
 
 	if (g_distributed)
@@ -716,7 +721,26 @@ double get_loss(float alpha)
 	double loss = 0.0;
 
 	for (int i = 0; i < g_feature_count; i++) {
-		loss += g_lambda_1 * fabs((1 - alpha) * g_beta[i] + alpha * g_beta_new[i]);
+		double coeff = (1 - alpha) * g_beta[i] + alpha * g_beta_new[i];
+		
+		if (g_scad_a < 2) {
+			loss += g_lambda_1 * fabs(coeff) + 0.5 * g_lambda_2 * SQUARE(coeff);
+		}
+		else {
+			double a = g_scad_a;
+			double lambda = g_lambda_1;
+			double beta = coeff;
+
+			if (fabs(beta) < lambda) {
+				loss += lambda * fabs(beta);
+			}
+			else if (lambda < fabs(beta) && fabs(beta) < a * lambda) {
+				loss += SQUARE(lambda) / 2 + (fabs(beta) - lambda) * (lambda + lambda / ((a - 1) * lambda) * (a * lambda - fabs(beta))) / 2;
+			}
+			else {
+				loss += a * SQUARE(lambda) / 2;
+			}
+		}
 	}
 
 	if (g_distributed)
@@ -727,15 +751,18 @@ double get_loss(float alpha)
 
 	for (int i = 0; i < g_example_count; i++) {
 	
-//		float log_odds = g_all_y[i] * (g_betaTx[i] + alpha * g_betaTx_delta[i]);
-//		loss += (log_odds < -100 ? log_odds : log(1.0 + exp(-log_odds)));
+		double log_odds = g_all_y[i] * (g_betaTx[i] + alpha * g_betaTx_delta[i]);
+		loss += (log_odds < -700 ? -log_odds : log(1.0 + exp(-log_odds)));
+
+		continue;
+
 
 		double exp_log_odds = (g_all_y[i] == -1 ? g_exp_betaTx[i] : 1.0 / g_exp_betaTx[i]);
 		double delta_log_odds = -g_all_y[i] * alpha * g_betaTx_delta[i];
 
 
 		//if (exp_log_odds == std::numeric_limits<double>::infinity()) {
-		//	cout << "inf " << i << " " << g_exp_betaTx[i] << " " << g_betaTx_delta[i] << endl;
+		//	cout << "inf " << i << " " << g_exp_betaTx[i] << " " << g_betaTx_delta[i] << endl;		
 		//}
 
 		if (delta_log_odds > 700) {
@@ -829,6 +856,66 @@ void golden_section_search(double (*f)(float x), int count_max, float a0, float 
 	printf("xmin = %f fmin = %e\n", *xmin, *fmin);
 }
 
+double get_beta_scad(double A, double B) {
+
+	double beta_after_cd = 0.0;
+
+	double a = g_scad_a;
+	double lambda = g_lambda_1;
+
+	double fmin = 1.0e15, fvalue;
+
+	// 
+	double beta_test = B / A;
+
+	if (fabs(beta_test) > lambda * a) {
+		fvalue = 0.5 * A * SQUARE(beta_test) - B * beta_test + SQUARE(lambda) * a / 2;
+
+		if (fvalue < fmin) {
+			fmin = fvalue;
+			beta_after_cd = beta_test;
+		} 
+	}
+
+	// 
+	beta_test = (B - a / (a - 1)) / (A - lambda / (a - 1));
+
+	if ((lambda < beta_test) && (beta_test <= a * lambda)) {
+		fvalue = 0.5 * A * SQUARE(beta_test) - B * beta_test + SQUARE(lambda) / 2 + (fabs(beta_test) - lambda) * (lambda + lambda / ((a - 1) * lambda) * (a * lambda - fabs(beta_test))) / 2;
+
+		if (fvalue < fmin) {
+			fmin = fvalue;
+			beta_after_cd = beta_test;
+		}
+	}
+
+	// 
+	beta_test = (B + a / (a - 1)) / (A + lambda / (a - 1));
+
+	if ((-a * lambda <= beta_test) && (beta_test < -lambda) ) {
+		fvalue = 0.5 * A * SQUARE(beta_test) - B * beta_test + SQUARE(lambda) / 2 + (fabs(beta_test) - lambda) * (lambda + lambda / ((a - 1) * lambda) * (a * lambda - fabs(beta_test))) / 2;
+
+		if (fvalue < fmin) {
+			fmin = fvalue;
+			beta_after_cd = beta_test;
+		}
+	}
+
+	//
+	beta_test = soft_threshold(B, lambda) / A;
+
+	if (fabs(beta_test) < lambda) {
+		fvalue = 0.5 * A * SQUARE(beta_test) - B * beta_test + lambda * fabs(beta_test);
+				
+		if (fvalue < fmin) {
+			fmin = fvalue;
+			beta_after_cd = beta_test;
+		}
+	}
+
+	return beta_after_cd;
+}
+ 
 void update_feature(float sum_w_q_x, float sum_w_x_2, float beta_max, feature_t feature_id, float shrinkage, float shrinkage_max, float beta_min, bool zero_max_shrinkage, vector<float> *feature_lambda)
 {
 	float beta_after_cd = 0.0;
@@ -837,27 +924,42 @@ void update_feature(float sum_w_q_x, float sum_w_x_2, float beta_max, feature_t 
 	if (zero_max_shrinkage && beta == 0.0)
 		shrinkage = shrinkage_max;
 
-	float A = sum_w_x_2 * shrinkage;
+	float A = sum_w_x_2 * shrinkage + g_lambda_2;
 	float B = sum_w_q_x + (shrinkage - 1.0 + NU) * sum_w_x_2 * beta;
 
 	if (feature_lambda)
 		feature_lambda->at(feature_id) = B;
-		
-	if (A != 0.0)
-		beta_after_cd = soft_threshold(B, g_lambda_1) / A;
-	else
-		beta_after_cd = 0.0;
+
+	//
+	// don't use SCAD
+	//
+	if (g_scad_a < 2.0) {
+		if (A != 0.0)
+			beta_after_cd = soft_threshold(B, g_lambda_1) / A;
+		else
+			beta_after_cd = 0.0;
+	}
+	else { // use SCAD
+
+		if (A != 0) {
+			beta_after_cd = get_beta_scad(A, B);
+		}
+		else {
+			beta_after_cd = 0.0;
+		}
+	}
 
 	if (fabs(beta_after_cd) > beta_max)
 		beta_after_cd = SGN(beta_after_cd) * beta_max;
 		
 	float beta_step_max = 10.0;
 
-	if (fabs(beta_after_cd - beta) > beta_step_max)
+	if (fabs(beta_after_cd - beta) > beta_step_max) {
 		if (beta_after_cd > beta)
 			beta_after_cd = beta + beta_step_max;
 		else
 			beta_after_cd = beta - beta_step_max;
+	}
 
 	if (fabs(beta_after_cd) < beta_min)
 		beta_after_cd = 0.0;
@@ -920,7 +1022,7 @@ double get_combined_loss(double alpha[3]) {
 			beta_final += alpha[k] * g_beta_delta[k][i];
 		}
 
-		loss += g_lambda_1 * fabs(beta_final);
+		loss += g_lambda_1 * fabs(beta_final) + 0.5 * g_lambda_2 * SQUARE(beta_final);
 	}
 
 	for (int i = 0; i < g_example_count; i++) {
@@ -1171,8 +1273,6 @@ void print_vector_line(const char* name, int *v, int n)
 	printf("\n");
 }
 
-
-
 void back_search(double zero_alpha_loss, float *best_alpha, double *min_loss, int *count, double *sum_loss)
 {
 	if (count) *count = 0;
@@ -1227,22 +1327,50 @@ void back_search_armijo(double zero_alpha_loss, float alpha_init, float *subgrad
 
 	if (count) *count = 0;
 
-	*best_alpha = 0.0;
-	*min_loss = zero_alpha_loss;
-
 	float reg_value_new = 0.0, reg_value = 0.0;
 
 	for (int i = 0; i < g_feature_count; ++i) {
-		reg_value += g_lambda_1 * fabs(g_beta[i]);
-		reg_value_new += g_lambda_1 * fabs(g_beta_new[i]);
+		if (g_scad_a < 2) { 
+			reg_value += g_lambda_1 * fabs(g_beta[i]);
+			reg_value += 0.5 * g_lambda_2 * SQUARE(g_beta[i]);
+
+			reg_value_new += g_lambda_1 * fabs(g_beta_new[i]);
+			reg_value_new += 0.5 * g_lambda_2 * SQUARE(g_beta_new[i]);
+		}
+		else { /*
+			double a = g_scad_a;
+			double lambda = g_lambda_1;
+			double beta = g_beta[i];
+
+			if (fabs(g_beta[i]) < g_lambda_1) {
+				reg_value += lambda* fabs(g_beta[i]);
+			}
+			else if (lambda < fabs(g_beta[i]) && fabs(g_beta[i]) < a * lambda) {
+				reg_value += SQUARE(lambda) / 2 + (fabs(beta) - lambda) * (lambda + lambda / ((a - 1) * lambda) * (a * lambda - fabs(beta))) / 2;
+			}
+			else {
+				reg_value += a * SQUARE(lambda) / 2;
+			}*/
+		}
 	}
+
+ 	double D = (subgrad_L_delta_beta + reg_value_new - reg_value);
+
+	if (g_distributed)
+		D = accumulate_scalar(g_master_location, D);
+
+	if (!(g_scad_a < 2.0))
+		D = 0.0;
+
+	*best_alpha = 0.0;
+	*min_loss = zero_alpha_loss;
 
 	for (int i = 0; i <= BACK_SEARCH_ARMIJO_MAX; i++) {
 		double alpha = alpha_init * pow(0.5, i);
 		double loss = get_loss(alpha);
 		if (count) (*count)++;
 		
-		int armijo_ok = (int)((loss - zero_alpha_loss) < (SIGMA * alpha * (subgrad_L_delta_beta + reg_value_new - reg_value)));
+		int armijo_ok = (int)((loss - zero_alpha_loss) < (SIGMA * alpha * D));
 
 		printf("armijo: count %d alpha %f loss %e ok %d\n", *count, alpha, loss, armijo_ok);
 
@@ -1831,6 +1959,7 @@ void read_beta(const char *filename, float *g_beta, float* g_beta_new, double *g
 
 	for (example_t i = 0; i < g_example_count; ++i) {
 		g_exp_betaTx[i] = exp(betaTx[i]);
+		g_betaTx[i] = betaTx[i];
 	}
 
 	safe_free(betaTx);
@@ -1927,8 +2056,10 @@ void solve_quadratic(const po::variables_map& vm, bool active_feature_iter, floa
 			int y;
 			float weight, x;
 
-			double sum_w_x_2 = 0.0;
-			double sum_w_q_x = 0.0;
+			double sum_w_x_2 = 0;
+			double sum_w_q_x = 0;
+
+			subgrad[feature_id] = 0;
 
 			while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
 
@@ -2034,6 +2165,7 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 
 	printf("\n");
 	printf("lambda_1 = %f\n", g_lambda_1);
+	printf("lambda_2 = %f\n", g_lambda_2);
 	printf("\n");
 
 	for (int iter = 1; iter <= iterations_max; iter++) {
@@ -2052,9 +2184,22 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 		}
 		cout << "min_beta = " << min_beta << " max_beta = " << max_beta << endl;
 
-		double max_exp_betaTx = g_exp_betaTx[0], min_exp_betaTx = g_exp_betaTx[0];
 
 		/* */
+
+		double max_betaTx = g_betaTx[0], min_betaTx = g_betaTx[0];
+
+		for (example_t i = 0; i < g_example_count; ++i) {
+			if (g_betaTx[i] > max_betaTx) max_betaTx = g_betaTx[i];
+			if (g_betaTx[i] < min_betaTx) min_betaTx = g_betaTx[i];
+		}
+
+
+		cout << "min_betaTx = " << min_betaTx << " max_betaTx = " << max_betaTx << endl;
+
+		/* */
+
+		double max_exp_betaTx = g_exp_betaTx[0], min_exp_betaTx = g_exp_betaTx[0];
 
 		for (example_t i = 0; i < g_example_count; ++i) {
 			if (g_exp_betaTx[i] > max_exp_betaTx) max_exp_betaTx = g_exp_betaTx[i];
@@ -2129,7 +2274,9 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 		double subgrad_norm_local = 0.0, subgrad_norm;
 
 		for (int i = 0; i < g_feature_count; i++) {
+			subgrad[i] += g_lambda_2 * g_beta[i];
 			subgrad[i] = soft_threshold(subgrad[i], g_lambda_1);
+
 			subgrad_norm_local += SQUARE(subgrad[i]);
 		}
 	
@@ -2156,11 +2303,14 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 			if (vm.count("ada-alpha")) {
 				back_search_armijo(prev_loss, alpha_guess, subgrad, &best_alpha, &min_loss, &(iter_stat[iter].back_search_count));
 				alpha_guess = std::min(best_alpha * 2, 1.0f);
+
+				sum_loss = get_loss(1.0);
 			}
 			else if (!vm.count("linear-search")) {
 				back_search_armijo(prev_loss, 1.0, subgrad, &best_alpha, &min_loss, &(iter_stat[iter].back_search_count));
 
 				sum_loss = get_loss(1.0);
+				iter_stat[iter].rel_sum_err = (sum_loss - prev_loss) / prev_loss;
 			}
 			else {
 				float xmin;
@@ -2179,7 +2329,7 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 				}
 				else {
 					golden_section_search(f_alpha, 10, 0, 1, f_0, f_1, &xmin, &fmin);
-				}
+				}				
 
 				back_search_armijo(prev_loss, xmin, subgrad, &best_alpha, &min_loss, &(iter_stat[iter].back_search_count));
 			}
@@ -2228,7 +2378,14 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 		// Stoping criteria
 		//	
 		double ideal_rel_loss_diff = ((min_loss - prev_loss) / prev_loss);
+		double rel_sum_err = ((sum_loss - prev_loss) / prev_loss);
+
 		bool stop = (iter == iterations_max) || ((fabs(ideal_rel_loss_diff) < termination_eps) && (sum_loss <= prev_loss * (1 + termination_eps)));
+
+		if (ideal_rel_loss_diff == 0.0) {
+			stop = true;
+			cout << "WARNING stuck in local minima" << endl;			
+		}
 
 		//
 		// Maybe change alpha ?
@@ -2251,6 +2408,7 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 		iter_stat[iter].loss = loss_new;
 		iter_stat[iter].rel_loss_diff = rel_loss_diff;
 		iter_stat[iter].ideal_rel_loss_diff = ideal_rel_loss_diff;
+		iter_stat[iter].rel_sum_err = rel_sum_err;
 		iter_stat[iter].time = get_work_time();
 		iter_stat[iter].full_time = get_full_time();
 		iter_stat[iter].alpha = best_alpha;
@@ -2262,7 +2420,18 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 		//
 		if (make_newton) {
 			for (int i = 0; i < g_example_count; i++) {
-				g_exp_betaTx[i] *= exp(best_alpha * g_betaTx_delta[i]);
+				g_betaTx[i] += best_alpha * g_betaTx_delta[i];
+
+				if (g_betaTx[i] < -700)
+					g_exp_betaTx[i] = exp(-700);
+				else if (g_betaTx[i] > 700)
+					g_exp_betaTx[i] = exp(700);
+				else
+					g_exp_betaTx[i] = exp(g_betaTx[i]);
+
+				//g_exp_betaTx[i] *= exp(best_alpha * g_betaTx_delta[i]);
+				//g_exp_betaTx[i] = std::max(std::numeric_limits<double>::epsilon(), g_exp_betaTx[i]);
+ 
 				g_betaTx_delta[i] = 0.0;
 			}
 
@@ -2327,10 +2496,18 @@ void solve_d_glmnet(int iterations_max, int lambda_idx, const po::variables_map&
 	print_time_summary();
 
 	if (!vm["final-regressor"].empty()) {
-		if (vm["sparse-model"].as<int>())
-			save_sparse_beta(vm["final-regressor"].as<string>(), g_beta);
-		else
-			save_beta(vm["final-regressor"].as<string>());
+
+		if (vm.count("lambda-path")) {
+			string filename = vm["final-regressor"].as<string>() + string(".") + to_string(lambda_idx, "%03d");
+			cout << "saving regressor into " << filename << endl;
+			save_sparse_beta(filename, g_beta);
+		}
+		else {
+			if (vm["sparse-model"].as<int>())
+				save_sparse_beta(vm["final-regressor"].as<string>(), g_beta);
+			else
+				save_beta(vm["final-regressor"].as<string>());
+		}
 	}
 
 	print_iter_stat(iter_stat, iterations_done);
@@ -2342,6 +2519,8 @@ int solve_reg_path_d_glmnet(int iterations_max, const po::variables_map& vm, str
 	// Allocating important vectors
 	//
 	g_exp_betaTx = (double*)safe_calloc(g_example_count, sizeof(double));
+	g_betaTx = (float*)safe_calloc(g_example_count, sizeof(float));
+
 	g_betaTx_delta = (float*)safe_calloc(g_example_count, sizeof(float));
 	g_beta = (float*)safe_calloc(g_feature_count, sizeof(float));
 	g_beta_new = (float*)safe_calloc(g_feature_count, sizeof(float));
@@ -2370,6 +2549,7 @@ int solve_reg_path_d_glmnet(int iterations_max, const po::variables_map& vm, str
 
 		for (int i = 0; i < g_example_count; i++) {
 			g_exp_betaTx[i] = exp(bias);
+			g_betaTx[i] = bias;
 		}
 		stop_timer("find bias");
 	}
@@ -2407,21 +2587,24 @@ int solve_reg_path_d_glmnet(int iterations_max, const po::variables_map& vm, str
 	//
 	for (int i = 0; i < lambda_1.size(); ++i) {
 		g_lambda_1 = lambda_1[i];
+
 		solve_d_glmnet(iterations_max, i, vm, cache_filename, termination_eps);
 	}
 
 	//
 	// Write lambda for features
 	//
-	FILE *file_rfeatures = fopen("lambda_model", "w");
+	if (vm.count("lambda-model")) {
+		FILE *file_rfeatures = fopen("lambda_model", "w");
 
-	for (int i = 1; i < g_feature_count; i++) {
-		fprintf(file_rfeatures, "%d\t%e\n", i, feature_lambda[i]);
+		for (int i = 1; i < g_feature_count; i++) {
+			fprintf(file_rfeatures, "%d\t%e\n", i, feature_lambda[i]);
+		}
+
+		fclose(file_rfeatures);
 	}
 
-	fclose(file_rfeatures);
-
-	//safe_free(g_betaTx);
+	safe_free(g_betaTx);
 	safe_free(g_exp_betaTx);
 	safe_free(g_betaTx_delta);
 	safe_free(g_beta);  
@@ -2642,6 +2825,8 @@ int main(int argc, char **argv)
         	("initial-regressor,i", po::value<string>(), "initial weights")
         	("final-regressor,f", po::value<string>(), "final weights")
 		("lambda-1", po::value<vector<float> >()->default_value(default_lambda, "1.0"), "L1 regularization, allowed multiple values")
+		("lambda-2", po::value<float>()->default_value(0.0), "L2 regularization")
+		("scad-a", po::value<float>()->default_value(0.0), "SCAD a coefficient")
 		("lambda-path", po::value<int>(), "L1 regularization, number of labmdas in regularization path")
 		("combine-type,c", po::value<int>()->default_value(1), "type of deltas combination during AllReduce: \n0 - sum, 1 - best, 2 - Nelder-Mead, 3 - discrete opt, 4 - random, 5 - smart sum, 6 - shrinked sum")
 		("termination", po::value<float>()->default_value(1.0e-4), "termination criteria")
@@ -2664,6 +2849,7 @@ int main(int argc, char **argv)
 		("async-cycle", po::value<int>()->default_value(0), "asynchronous cycle")
 		("async-count", po::value<int>()->default_value(1), "times to synchronize per cycle over features")
 		("rm-dataset", "remove raw dataset")
+		("lambda-model", "save per-feature lambdas")
 		;
 
 	po::options_description admm_desc("ADMM options");
@@ -2695,7 +2881,11 @@ int main(int argc, char **argv)
 	}
 
 	string dataset_filename = vm["dataset"].as<string>();
+
 	vector<float> lambda_1 = vm["lambda-1"].as<vector<float> >();
+	g_lambda_2 = vm["lambda-2"].as<float>();
+	g_scad_a = vm["scad-a"].as<float>();
+
 	int iterations_max = vm["iterations"].as<int>();
 	g_distributed = !vm["server"].empty();
 	float termination_eps = vm["termination"].as<float>();
