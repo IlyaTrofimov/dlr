@@ -63,7 +63,7 @@ example_t g_feature_count;
 float g_lambda_1;
 float g_lambda_2;
 float g_scad_a;
-int *g_all_y;
+float *g_all_y;
 bool g_distributed;
 
 float *g_betaTx_delta_c[3];
@@ -200,7 +200,7 @@ static inline float soft_threshold(float x, float a)
 
 char g_buffer[1<<20];
 
-int parse_line(FILE *file, feature_t *feature_id, example_t *example_id, int *y, float *weight, float *x, fpos_t *fpos)
+int parse_line(FILE *file, feature_t *feature_id, example_t *example_id, float *x, fpos_t *fpos)
 {
 	if (fpos)
 		fgetpos(file, fpos);
@@ -211,12 +211,6 @@ int parse_line(FILE *file, feature_t *feature_id, example_t *example_id, int *y,
 
 		pstr = strtok(NULL, " \t");
 		*example_id = strtoul(pstr, NULL, 10);
-
-		//pstr = strtok(NULL, " \t");
-		//*y = strtol(pstr, NULL, 10);
-
-		//pstr = strtok(NULL, " \t");
-		//*weight = atof(pstr);
 
 		pstr = strtok(NULL, " \t");
 		*x = atof(pstr);
@@ -233,10 +227,10 @@ public:
 	Cache() {};
 	void Create(const char *dataset_filename, const char *cache_filename, feature_t *max_feature_id, ulong *lines_count, example_t *unique_features);
 	int ReadVariable(feature_t *feature_id);
-	int ReadLine(example_t *example_id, float *x, int *y, float *weight);
+	int ReadLine(example_t *example_id, float *x, float *y, float *weight);
 	void MoveToStartVariable();
 	void Rewind();
-	int* GetY();
+	float* GetY();
 	feature_t GetFeatureId(int idx);
 	feature_t GetFeatureIndex(feature_t feature_count);
 	void InitY(example_t example_count, feature_t feature_count, const po::variables_map& vm);
@@ -251,7 +245,7 @@ private:
 	feature_t _feature_id;
 	bool _is_new_feature;
 	fpos_t _start_feature_pos;
-	int *_all_y;
+	float *_all_y;
 
 	vector<float> _y;
 	vector<float> _weight;	
@@ -269,7 +263,7 @@ Cache::~Cache()
 	safe_free(_all_y);
 }
 
-int* Cache::GetY()
+float* Cache::GetY()
 {
 	return _all_y;
 }
@@ -307,7 +301,7 @@ void Cache::InitCache(feature_t feature_count)
 		i++;
 
 		example_t example_id;
-		int y;
+		float y;
 		float weight, x;
 
 		while(ReadLine(&example_id, &x, &y, &weight)) {	}
@@ -319,7 +313,7 @@ void Cache::InitCache(feature_t feature_count)
 void Cache::InitY(example_t example_count, feature_t feature_count, const po::variables_map& vm)
 {
 	Rewind();
-	_all_y = (int*)safe_calloc(example_count, sizeof(int));
+	_all_y = (float*)safe_calloc(example_count, sizeof(float));
 
 	//
 	// Synchronize all_y at nodes (some nodes may not have full list of the examples)
@@ -366,14 +360,14 @@ void Cache::ReadY(const char *labels_filename, example_t *max_example_id)
 	while (!feof(file)) {
 
 		example_t example_id;
-		int y;
+		float y;
 		float weight; 
 		if (fgets(g_buffer, sizeof(g_buffer), file)) {
 			char *pstr = strtok(g_buffer, " \t");
 			example_id = strtoul(pstr, NULL, 10);
 
 			pstr = strtok(NULL, " \t");
-			y = strtol(pstr, NULL, 10);
+			y = atof(pstr);
 
 			pstr = strtok(NULL, " \t");
 			weight = atof(pstr);
@@ -396,7 +390,7 @@ void Cache::ReadY(const char *labels_filename, example_t *max_example_id)
 
 	example_t example_count = *max_example_id + 1;
 
-	_all_y = (int*)safe_calloc(example_count, sizeof(int));
+	_all_y = (float*)safe_calloc(example_count, sizeof(float));
 
 	for (int i = 0; i < (int)example_count; i++)			
 		_all_y[i] = _y[i];
@@ -426,10 +420,9 @@ void Cache::Create(const char *dataset_filename, const char *cache_filename, fea
 
 		feature_t feature_id;
 		example_t example_id;
-		int y;
 		float weight, x; 
 
-		while (parse_line(file_dataset, &feature_id, &example_id, &y, &weight, &x, NULL)) {
+		while (parse_line(file_dataset, &feature_id, &example_id, &x, NULL)) {
 
 			line_num++;
 
@@ -508,10 +501,10 @@ void Cache::MoveToVar(feature_t feature_id)
 	_is_new_feature = true;
 }
 
-int Cache::ReadLine(example_t *example_id, float *x, int *y, float *weight)
+int Cache::ReadLine(example_t *example_id, float *x, float *y, float *weight)
 {
 	example_t tmp_example_id;
-	int tmp_y;
+	float tmp_y;
 	float tmp_x, tmp_weight;
 
 	if (!example_id) example_id = &tmp_example_id;
@@ -546,7 +539,7 @@ void update_betaTx(float delta_beta)
 {
 	feature_t feature_id;
 	example_t example_id;
-	int y;
+	float y;
 	float weight, x;
 	
 	g_cache.ReadVariable(&feature_id); 
@@ -573,7 +566,7 @@ double get_qloss()
 			p = 0.999999;
 
 		float w = p * (1 - p);
-		int y01 = (g_all_y[i] + 1) / 2;
+		float y01 = (g_all_y[i] + 1) / 2;
 
 		qloss += 0.5 * w * SQUARE((y01 - p) / w - g_betaTx_delta[i]);
 	}
@@ -587,7 +580,7 @@ float* get_grad(const char *cache_filename)
 	float *grad = (float*)safe_calloc(g_feature_count, sizeof(float));
 	feature_t feature_id;
 	example_t example_id;
-	int y;
+	float y;
 	float weight, x; 
 
 	g_cache.Rewind();
@@ -622,7 +615,7 @@ double get_loss_exact(const char *cache_filename, float alpha)
 	float *y_betaTx = (float*)safe_calloc(g_example_count, sizeof(float));
 	feature_t feature_id;
 	example_t example_id;
-	int y;
+	float y;
 	float weight, x; 
 
 	g_cache.Rewind();
@@ -694,7 +687,7 @@ int approx_bsearch(const vector<float>& array, float key)
 	return position;
 }
 
-double get_logistic_loss_admm(int *all_y, float *betaTx, float *beta)
+double get_logistic_loss_admm(float *all_y, float *betaTx, float *beta)
 {
 	double loss = 0.0;
 
@@ -714,6 +707,26 @@ double get_logistic_loss_admm(int *all_y, float *betaTx, float *beta)
 
 	return loss;
 }
+
+double get_squared_loss_admm(float *all_y, float *betaTx, float *beta)
+{
+	double loss = 0.0;
+
+	for (int i = 0; i < g_feature_count; i++) {
+		loss += g_lambda_1 * fabs(beta[i]) + 0.5 * g_lambda_2 * SQUARE(beta[i]);
+	}
+
+	if (g_distributed)
+		loss = accumulate_scalar(g_master_location, loss);
+
+	for (int i = 0; i < g_example_count; i++) {
+	
+		loss += 0.5 * SQUARE(all_y[i] - betaTx[i]);
+	}
+
+	return loss;
+}
+
 
 
 double get_loss(float alpha)
@@ -1821,7 +1834,7 @@ double solve_one_dim_log_reg(double x, double a, double c, int steps_max = 10)
 	return x;
 }
 
-float newton_step(float bias, int *all_y, float lambda_1, example_t example_count)
+float newton_step(float bias, float *all_y, float lambda_1, example_t example_count)
 {
 	double sum_w_x_2 = 0;
 	double sum_w_q_x = 0;
@@ -1860,7 +1873,7 @@ float newton_step(float bias, int *all_y, float lambda_1, example_t example_coun
 	return bias;
 }
 
-float find_bias(int steps_max, int *all_y, float lambda_1, example_t example_count)
+float find_bias(int steps_max, float *all_y, float lambda_1, example_t example_count)
 {
 	float bias = 0.0;
 
@@ -1883,7 +1896,7 @@ void get_feature_lambda(float *f_lambda)
 		g_cache.ReadVariable(&feature_id);
 
 		example_t example_id;
-		int y;
+		float y;
 		float weight, x;
 
 		double sum_w_x_2 = 0.0;
@@ -1945,7 +1958,7 @@ void read_beta(const char *filename, float *g_beta, float* g_beta_new, double *g
 		g_cache.ReadVariable(&feature_id);
 
 		example_t example_id;
-		int y;
+		float y;
 		float weight, x;
 
 		while (g_cache.ReadLine(&example_id, &x, &y, &weight)) {
@@ -2053,7 +2066,7 @@ void solve_quadratic(const po::variables_map& vm, bool active_feature_iter, floa
 			g_cache.ReadVariable(&feature_id);
 
 			example_t example_id;
-			int y;
+			float y;
 			float weight, x;
 
 			double sum_w_x_2 = 0;
@@ -2676,8 +2689,7 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 				g_cache.ReadVariable(&feature_id);
 
 				example_t example_id;
-				int y;
-				float a;
+				float y, a;
 
 				double sum_1 = 0.0, sum_2 = 0.0;
 				subgrad[feature_id] = 0.0;
@@ -2713,12 +2725,6 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 					xk[feature_id] = x_new;
 				}
 			}
-
-			/*memcpy(Ax_copy, Ax, g_example_count * sizeof(float));
-
-			if (distributed) {
-				accumulate_vector(g_master_location, Ax_copy, g_example_count);
-			}*/
 		}
 
 		memcpy(Aixik, Ax, g_example_count * sizeof(float));
@@ -2735,12 +2741,17 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 			subgrad_norm = sqrt(accumulate_scalar(g_master_location, SQUARE(subgrad_local_norm)));
 		}
 			
-		iter_stat[iter].loss = get_logistic_loss_admm(g_cache.GetY(), Axk, xk);
+		if (vm["loss"].as<int>() == LOSS_SQUARED) {
+			iter_stat[iter].loss = get_squared_loss_admm(g_cache.GetY(), Axk, xk);
+		}
+		else {
+			iter_stat[iter].loss = get_logistic_loss_admm(g_cache.GetY(), Axk, xk);
+		}
 		iter_stat[iter].subgrad_norm = subgrad_norm;
 		iter_stat[iter].full_time = get_full_time();
 
 		cout << "loss = " << iter_stat[iter].loss << endl;
-		cout << "subgrad =" << subgrad_norm << endl;
+		cout << "subgrad = " << subgrad_norm << endl;
 
 		float alpha = 1.0;
 
@@ -2753,7 +2764,7 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 			Axk[i] /= N;
 			float Axk_hat = alpha * Axk[i] + (1 - alpha) * zk[i];
 
-			if (vm.count("loss") == LOSS_SQUARED) {
+			if (vm["loss"].as<int>() == LOSS_SQUARED) {
 				zk[i] = (g_all_y[i] + rho * Axk_hat + rho * uk[i]) / (N + rho);
 			}
 			else {
@@ -2779,6 +2790,19 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 
 		printf("%f %F %f\n", xk[0], xk[1], xk[2]);
 
+		subgrad_local_norm = square_norm(subgrad, g_feature_count);
+		subgrad_norm = subgrad_local_norm;
+
+		iter_stat[iter].loss = get_squared_loss_admm(g_cache.GetY(), Axk, xk);
+		iter_stat[iter].subgrad_norm = subgrad_norm;
+		iter_stat[iter].full_time = get_full_time();
+
+		cout << "loss = " << iter_stat[iter].loss << endl;
+		cout << "subgrad = " << subgrad_norm << endl;
+
+		stop_timer("iterations");
+		start_timer("update z, u");
+		
 		if (vm.count("save-per-iter") && !vm["final-regressor"].empty()) {
 			int lambda_idx = 0;
 			string filename = vm["final-regressor"].as<string>() + string(".") + to_string(lambda_idx, "%03d") + string(".") + to_string(iter, "%03d");
@@ -2810,12 +2834,134 @@ int solve_admm(int iterations_max, const po::variables_map& vm, string cache_fil
 	safe_free(subgrad);
 }
 
+int solve_lasso(int iterations_max, const po::variables_map& vm, string cache_filename, float termination_eps, float lambda_1)
+{
+	IterStat iter_stat[iterations_max + 1];
+	memset(iter_stat, 0, sizeof(iter_stat));
+	iter_stat[0].loss = 0.0;
+	iter_stat[0].time = 0;
+	iter_stat[0].subgrad_norm = 0.0;
+
+	const int LASSO_ITER_MAX = 1;
+
+	float *x = (float*)safe_calloc(g_feature_count, sizeof(float));
+	float *Ax = (float*)safe_calloc(g_example_count, sizeof(float));
+	float *Ax_old = (float*)safe_calloc(g_example_count, sizeof(float));
+
+	float *subgrad = (float*)safe_calloc(g_feature_count, sizeof(float));
+
+	int iter;
+
+	for (iter = 1; iter <= iterations_max; iter++) {
+		
+		start_timer("iterations");
+		printf("Iteration %d\n", iter);
+		printf("--------------\n");
+
+		feature_t processed_features = 0;
+		int lines_processed = 0;
+		memset(subgrad, 0, g_feature_count * sizeof(float));
+
+		{
+			g_cache.Rewind();
+			cout << "------------------" << endl;
+
+			for (feature_t feature_idx = 0; feature_idx < g_cache.GetCacheFeatureCount(); ++feature_idx) {
+				
+				feature_t feature_id = g_cache.GetFeatureId(feature_idx);
+				g_cache.ReadVariable(&feature_id);
+
+				example_t example_id;
+				float y;
+				float a;
+
+				double sum_1 = 0.0, sum_2 = 0.0;
+				subgrad[feature_id] = 0.0;
+				int examples_feature = 0;
+				double t = 0.0;
+
+				while (g_cache.ReadLine(&example_id, &a, &y, NULL)) {
+
+					float y_tmp = y - (Ax[example_id] - x[feature_id] * a);
+	
+					sum_1 += y_tmp * a;
+					sum_2 += a * a;
+					lines_processed++;
+
+					subgrad[feature_id] += a * (Ax_old[example_id] - y);
+					examples_feature++;
+				}
+			
+				sum_2 += g_lambda_2;
+				float x_new = (sum_2 > 0 ? soft_threshold(sum_1, lambda_1) / sum_2 : 0.0);
+
+				subgrad[feature_id] += g_lambda_2 * x[feature_id];
+				subgrad[feature_id] = soft_threshold(subgrad[feature_id], lambda_1);
+
+				if (x_new != x[feature_id]) {
+					update_feature_admm(x_new - x[feature_id], Ax);
+					x[feature_id] = x_new;
+				}
+			}
+		}
+
+		memcpy(Ax_old, Ax, g_example_count * sizeof(float));
+
+		double subgrad_local_norm = square_norm(subgrad, g_feature_count);
+		float subgrad_norm = subgrad_local_norm;
+
+		iter_stat[iter].loss = get_squared_loss_admm(g_cache.GetY(), Ax, x);
+		iter_stat[iter].subgrad_norm = subgrad_norm;
+		iter_stat[iter].full_time = get_full_time();
+
+		cout << "loss = " << iter_stat[iter].loss << endl;
+		cout << "subgrad = " << subgrad_norm << endl;
+
+		stop_timer("iterations");
+
+		if (vm.count("save-per-iter") && !vm["final-regressor"].empty()) {
+			int lambda_idx = 0;
+			string filename = vm["final-regressor"].as<string>() + string(".") + to_string(lambda_idx, "%03d") + string(".") + to_string(iter, "%03d");
+			cout << "saving regressor into " << filename << endl;
+
+			//memcpy(x, xk, sizeof(float) * g_feature_count);
+			//accumulate_vector(g_master_location, x, g_feature_count);
+
+			save_sparse_beta(filename, x);
+		}
+
+		if (iter >= 2) {
+			float rel_decrease = (iter_stat[iter].loss - iter_stat[iter - 1].loss) / ((fabs(iter_stat[iter].loss) + fabs(iter_stat[iter - 1].loss)) / 2);
+			cout << "rel decrease = " << rel_decrease << endl;
+			
+
+			if (fabs(rel_decrease) < termination_eps) {
+				break;
+			}
+		}
+
+	}
+
+
+	if (!vm["final-regressor"].empty())
+		save_sparse_beta(vm["final-regressor"].as<string>(), x);
+
+	printf("\n");	
+	print_time_summary();
+	printf("\n");	
+	print_iter_stat(iter_stat, iter);
+
+	safe_free(x);
+	safe_free(Ax);
+	safe_free(subgrad);
+}
+
 int main(int argc, char **argv)
 {
 	time(&g_start_time);
 	srand(107);
 
-	vector<float> default_lambda(1, 1);
+	vector<float> default_lambda(1, 0.0);
 
 	po::options_description general_desc("General options");
 	general_desc.add_options()
@@ -2824,7 +2970,7 @@ int main(int argc, char **argv)
         	("labels,l", po::value<string>(), "labels of the training set")
         	("initial-regressor,i", po::value<string>(), "initial weights")
         	("final-regressor,f", po::value<string>(), "final weights")
-		("lambda-1", po::value<vector<float> >()->default_value(default_lambda, "1.0"), "L1 regularization, allowed multiple values")
+		("lambda-1", po::value<vector<float> >()->default_value(default_lambda, "0.0"), "L1 regularization, allowed multiple values")
 		("lambda-2", po::value<float>()->default_value(0.0), "L2 regularization")
 		("scad-a", po::value<float>()->default_value(0.0), "SCAD a coefficient")
 		("lambda-path", po::value<int>(), "L1 regularization, number of labmdas in regularization path")
@@ -2850,6 +2996,7 @@ int main(int argc, char **argv)
 		("async-count", po::value<int>()->default_value(1), "times to synchronize per cycle over features")
 		("rm-dataset", "remove raw dataset")
 		("lambda-model", "save per-feature lambdas")
+		("lasso" , "")
 		;
 
 	po::options_description admm_desc("ADMM options");
@@ -2977,7 +3124,11 @@ int main(int argc, char **argv)
 
 	int ret;
 
-	if (!vm.count("admm")) {
+	if (vm.count("lasso")) {
+		g_lambda_1 = lambda_1[0];
+		ret = solve_lasso(iterations_max, vm, cache_filename, termination_eps, lambda_1[0]);
+	}
+	else if (!vm.count("admm")) {
 		ret = solve_reg_path_d_glmnet(iterations_max, vm, cache_filename, termination_eps, lambda_1);
 	}
 	else {
