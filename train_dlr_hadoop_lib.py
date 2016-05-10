@@ -58,9 +58,11 @@ echo $mapred_job_id > /dev/stderr;
 
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:.;
 gunzip -f label.tmp.gz;
+fallocate -l 1GiB tmp_big_file;
+rm tmp_big_file;
 
 uname -n > log;
-./dlr -d train -l label.tmp -f model FEATURES SERVER_PARAMS INITIAL 1>> log 2>&1;
+./dlr -d train -l label.tmp --rm-dataset -f model FEATURES SERVER_PARAMS INITIAL 2>&1 | tee -a log 1> /dev/stderr;
 
 if ls *model* 1> /dev/null 2>&1 ; then
 	tar cfz models.tar.gz *model*;
@@ -70,7 +72,10 @@ hdfs dfs -put -f models.tar.gz $output_dir/$reducer_id.models.tar.gz;
 hdfs dfs -put -f log $output_dir/$reducer_id.log;
 '''
 
-	SERVER_PARAMS = '--server HOST --total $nreducers --unique-id $mapred_job_id --node $reducer_id'
+	if jobcount > 1:
+		SERVER_PARAMS = '--server HOST --total $nreducers --unique-id $mapred_job_id --node $reducer_id'
+	else:
+		SERVER_PARAMS = ''
 
 	reducer = reducer.replace('SERVER_PARAMS', SERVER_PARAMS)
 	reducer = reducer.replace('HOST', SPANNING_TREE_SERVER)
@@ -101,12 +106,13 @@ def train_dlr(src_tables, label_table, jobcount, features, model, debug = 'debug
 		print 'ERROR: NO INPUT DATA!'
 		return False
 
+#	create_reports('./dump-20141023-9', None)
 	out_dir = 'dlr-tmp/%d' % randint(0, 1000000)
 	reducer = create_reducer(jobcount, features, head, initial, out_dir)
 
 	reducer_file = '%d.sh' % randint(0, 1000000)
 
-#	reducer = '/bin/cat'
+#	reducer = '/bin/more'
 
 	file = open('/tmp/%s' % reducer_file, 'w')
 	file.write(reducer)
@@ -116,6 +122,8 @@ def train_dlr(src_tables, label_table, jobcount, features, model, debug = 'debug
 	print
 	print reducer
 	print
+
+#    -Dmapred.task.timeout=600000000 \
 
 	script = '''
 ./spanning_tree || true;
@@ -128,10 +136,12 @@ hadoop jar /usr/lib/hadoop-mapreduce/hadoop-streaming.jar \
     -Dmapred.reduce.tasks=JOBCOUNT \
     -Dmapred.job.name="dlr allreduce" \
     -Dmapred.map.tasks.speculative.execution=true \
-    -Dmapred.reduce.tasks.speculative.execution=true \
+    -Dmapred.reduce.tasks.speculative.execution=false \
+    -Dmapred.task.timeout=18000000 \
+    -D mapreduce.map.memory.mb=1000 \
+    -D mapreduce.reduce.memory.mb=8192 \
     -Dmapred.child.java.opts="-Xmx100m" \
-    -Dmapred.task.timeout=600000000 \
-    -Dmapred.job.map.memory.mb=1000 \
+    -Dmapred.job.priority=HIGH \
     SRC_TABLES \
     -output OUT_DIR \
     -mapper /bin/cat \
@@ -168,16 +178,18 @@ rm label.tmp.gz;
 		if table_exists(log_table):
 			execute('hdfs dfs -cat %s > %s/%06d.log' % (log_table, dump_dir, i))
 		else:
-			return 0
+			 res = -1
 			
 		model_table = '%s/%06d.models.tar.gz' % (out_dir, i)
 
 		if table_exists(model_table):
 			execute('hdfs dfs -cat %s > %s/%06d.models.tar.gz' % (model_table, dump_dir, i))
 		else:
-			return 0
+			res = -1
 
-	return res == 0
+	execute('hdfs dfs -rm -r -skipTrash %s' % out_dir)
+
+	return (res == 0)
 
 def get_iter_stat(dump_dir):
 
@@ -277,23 +289,6 @@ def get_test_metrics(dump_dir):
 
 	return text
 
-def join_metrics(iter_stat, test_metrics):
-	iter_stat_lines = iter_stat.split('\n')
-	test_metrics_lines = test_metrics.split('\n')
-	joined_lines = []
-
-	joined_lines.append(iter_stat_lines[0].strip(' ') + ' ' + test_metrics_lines[0].strip(' '))
-	joined_lines.append(iter_stat_lines[1].strip(' '))
-
-	for i in xrange(1, len(test_metrics_lines) - 1):
-		if i + 1 < len(iter_stat_lines):
-			joined_lines.append(iter_stat_lines[i + 1].strip(' ') + ' ' + test_metrics_lines[i].strip(' '))
-
-	for j in xrange(len(joined_lines)):
-		joined_lines[j] = joined_lines[j].replace(' ', '\t')
-
-	return '\n'.join(joined_lines)
-
 def write_task_description(a_dump_dir, task):
 	with open('%s/task' % a_dump_dir, 'w') as f:
 		print >>f, str(task)
@@ -310,33 +305,48 @@ def read_file(f):
 
 	return s
 
-def merge_models(files_list, out_file):
+def merge_models(files_list, out_file, style = 'vw'):
 
-	w = None
+	features_count = 0
 
 	for f in files_list:
 		file_lines = read_file(f).strip("\n").split("\n")
-		features_count = int(file_lines[0])
 
 		weights = map(lambda x : x.split(':'), filter(lambda x : len(x) > 3, file_lines[1:]))
 	
-		if w is None:
-			w = [0.0] * features_count
+		for (idx, value) in weights:
+			features_count = max(features_count, int(idx) + 1)
 
+	w = [0.0] * features_count
+
+	for f in files_list:
+		file_lines = read_file(f).strip("\n").split("\n")
+
+		weights = map(lambda x : x.split(':'), filter(lambda x : len(x) > 3, file_lines[1:]))
+	
 		for (idx, value) in weights:
 			w[int(idx)] = value
 
-	with open(out_file, 'w') as file:
+	if style != 'vw':
+		with open(out_file, 'w') as file:
 
-		file.write("solver_type L1R_LR\n")
-		file.write("nr_class 2\n")
-		file.write("label 1 -1\n")
-		file.write("nr_feature %d\n" % (features_count - 1))
-		file.write("bias -1\n")
-		file.write("w\n")
+			file.write("solver_type L1R_LR\n")
+			file.write("nr_class 2\n")
+			file.write("label 1 -1\n")
+			file.write("nr_feature %d\n" % (features_count - 1))
+			file.write("bias -1\n")
+			file.write("w\n")
 
-		for idx in xrange(1, features_count):
-			file.write('%s\n' % w[idx])
+			for idx in xrange(1, features_count):
+				file.write('%s\n' % w[idx])
+	else:
+		with open(out_file, 'w') as file:
+
+			file.write('%d\n' % (features_count + 1))
+
+			for idx in xrange(1, features_count):
+				file.write('%d:%s\n' % (idx, w[idx]))
+
 
 def create_reports(a_dump_dir, task, calc_metrics = True):
 
@@ -356,8 +366,12 @@ def create_reports(a_dump_dir, task, calc_metrics = True):
 			if os.path.isfile('%s/%d/model.000.%03d' % (a_dump_dir, 0, p)):
 				merge_models(['%s/%d/model.000.%03d' % (a_dump_dir, i, p) for i in xrange(jobcount)], '%s/model.000.%03d' % (a_dump_dir, p))
 
-		#execute('cd %s; tar xfvz models.tar.gz' % a_dump_dir)
-		str_all_metrics, all_metrics = get_models_metrics(a_dump_dir, iterations, test_file)
+		for lambda_idx in xrange(1000):
+			if os.path.isfile('%s/%d/model.%03d' % (a_dump_dir, 0, lambda_idx)):
+				merge_models(['%s/%d/model.%03d' % (a_dump_dir, i, lambda_idx) for i in xrange(jobcount)], '%s/model.%03d' % (a_dump_dir, lambda_idx))
+
+		execute('cd %s; tar xfvz models.tar.gz' % a_dump_dir)
+		str_all_metrics, all_metrics = get_models_metrics(a_dump_dir, test_file)
 
 		with open('%s/test_metrics' % a_dump_dir, 'w') as f:
 			f.write(str_all_metrics)
@@ -418,7 +432,7 @@ def process_task(task, should_create_reports = True):
 		local_dist_run(train_tables, label_table, test_file, jobcount, features, a_dump_dir)
 		train_ok = True
 
-	elif (jobcount > 1):   # distributed
+	elif jobcount > 1 or True:   # distributed
 		for count in xrange(5):
 			print 'Attempt ', count
 			if train_dlr(train_tables, label_table, jobcount, features, 'model', dump_dir = a_dump_dir, save_dataset = task.get('save_dataset', False), \
@@ -433,8 +447,8 @@ def process_task(task, should_create_reports = True):
 		else:
 			head = '| head -n 1000' if 'head' in task else ''
 				
-			execute('mapreduce -subkey -read %s > label.tmp' % (label_table))
-			execute('mapreduce -subkey -read %s %s | ./dlr -d /dev/stdin -l label.tmp %s -f %s/model 1> %s/local.log 2>&1' % (train_tables, head, features, a_dump_dir, a_dump_dir))
+			execute('hdfs dfs -cat %s > label.tmp' % (label_table))
+			execute('hdfs dfs -cat %s %s | ./dlr -d /dev/stdin -l label.tmp %s -f %s/model 1> %s/local.log 2>&1' % (train_tables, head, features, a_dump_dir, a_dump_dir))
 			
 		train_ok = True
 

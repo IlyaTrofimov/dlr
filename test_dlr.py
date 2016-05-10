@@ -79,7 +79,7 @@ class AsyncFunc(Process):
 		exec(self.__func)		
 		self.__child_con.send((metrics, features_count))
 
-def get_models_metrics(dir_models, max_model, test_file):
+def get_models_metrics(dir_models, test_file):
 
 	metrics = ['MSE', 'NLL', 'LinCorr', 'auPRC', 'Alpha']
 
@@ -89,6 +89,7 @@ def get_models_metrics(dir_models, max_model, test_file):
 	all_test_metrics = []
 
 	files = [f for f in os.listdir(dir_models) if re.match(r'^model\.[0-9]+\.[0-9]+$', f)]
+	files += [f for f in os.listdir(dir_models) if re.match(r'^model\.[0-9]+$', f)]
 	files.sort()
 	
 	max_model = len(files)

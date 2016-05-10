@@ -60,42 +60,129 @@ if __name__ == '__main__':
 
 #
 #----------------------------------------------------
+#	"yandex_ad2_scad" dataset
+#----------------------------------------------------
+
+	base_task = {
+		'train_tables':		'dlr/data/yandex_ad2.train.ii2',
+		'label_table':		'dlr/data/yandex_ad2.train.label',
+		'test_file':		'/home/trofim/dlr_data/yandex_ad2.test.svm',
+		'jobcount':		16,
+		'params': {
+			'iterations':		20,
+			'lambda-1':		get_lambda_list([8,4,2,1,0.5,0.25,0.125]),
+			'scad-a':		3,
+			'termination':		1.0e-2,
+			'combine-type':		0,
+			'beta-max':		10,
+			},
+		'etalon_loss': 16986380.197,
+		}
+
+	yandex_ad_scad_task = deepcopy(base_task)
+	yandex_ad_scad_task['params']['combine-type'] = 0;
+	yandex_ad_scad_task['params']['find-bias'] = 1;
+	yandex_ad_scad_task['params']['last-iter-sum'] = 1;
+	yandex_ad_scad_task['params']['ada-alpha'] = 1;
+	yandex_ad_scad_task['params']['async-cycle'] = 1
+
+#
+#----------------------------------------------------
 #	"yandex_ad2" dataset
 #----------------------------------------------------
 
 	base_task = {
-		'train_tables':		'users/trofim/genkin/yandex_ad2.train.ii2',
-#		'train_tables':		'users/trofim/genkin/yandex_ad2.train.subsample.ii2',
-		'label_table':		'users/trofim/genkin/yandex_ad2.train.label',
-		'test_file':		'/mnt/raid/home/trofim/genkin/yandex_ad2.test.svm',
-		'jobcount':		16,
-#		'head':			1,
+		'train_tables':		'dlr/data/yandex_ad2.train.ii2',
+		'label_table':		'dlr/data/yandex_ad2.train.label',
+		'test_file':		'/home/trofim/dlr_data/yandex_ad2.test.svm',
+		'jobcount':		64,
 		'params': {
-			'iterations':		32,
-			'lambda-1':		16.0,
+			'iterations':		20,
+#			'lambda-1':		2,
+			'lambda-1':		0,
+			'lambda-2':		16,
 			'termination':		0.0,
 			'combine-type':		0,
 			'save-per-iter':	1,
-#			'beta-max':		10,
+			'beta-max':		10,
 			},
-		'etalon_loss': 7.10e7,
-		'save_dataset': False,
-#		'report_only':			'./dump-20140531-0',
+		'etalon_loss': 16986380.197,
+#		'report_only':			'./dump-20150213-1',
 		}
 
-	task = deepcopy(base_task)
-	task['params']['combine-type'] = 0;
-	task['params']['find-bias'] = 1;
-	task['params']['linear-search'] = 1;
-	task['params']['last-iter-sum'] = 1;
-	task['params']['termination'] = 1.0e-3;
+	yandex_ad_task = deepcopy(base_task)
+	yandex_ad_task['params']['combine-type'] = 0;
+	yandex_ad_task['params']['find-bias'] = 1;
+	yandex_ad_task['params']['linear-search'] = 1;
+	yandex_ad_task['params']['last-iter-sum'] = 1;
+	yandex_ad_task['params']['ada-alpha'] = 1;
+	yandex_ad_task['params']['async-cycle'] = 1
+#	task['params']['termination'] = 1.0e-3;
 #	task['params']['lambda-path'] = 10
 #	task['params']['lambda-1'] = get_lambda_list([22229.60547, 11114.80273, 5557.401367, 2778.700684, 1389.350342, 694.6751709, 347.3375855, 173.6687927, 86.83439636, 43.41719818])
-	task['params']['lambda-1'] = 5557.401367
-	task['initial-regressor'] = '/mnt/raid/home/trofim/dlr/dump-20140531-0/model.001.004'
+#	task['params']['lambda-1'] = 5557.401367
+#	task['initial-regressor'] = '/mnt/raid/home/trofim/dlr/dump-20140531-0/model.001.004'
 #	task['params']['iterations'] = 10;
 #	task['params']['lambda-1'] = get_lambda_list([pow(2, x) for x in xrange(10, -1, -1)])
 #	tasks.append(task)
+
+#
+#----------------------------------------------------
+#	"yandex_ad2_l2" dataset
+#----------------------------------------------------
+
+	base_task = {
+		'train_tables':		'dlr/data/yandex_ad2.train.ii2',
+		'label_table':		'dlr/data/yandex_ad2.train.label',
+		'test_file':		'/home/trofim/dlr_data/yandex_ad2.test2.svm',
+		'jobcount':		64,
+		'params': {
+			'iterations':		20,
+			'lambda-1':		0,
+			'lambda-2':		16,
+			'termination':		0.0,
+			'combine-type':		0,
+			'save-per-iter':	1,
+			'beta-max':		10,
+			},
+		'etalon_loss': 16986380.197,
+	#	'report_only':			'./dump-20150409-1',
+		}
+
+	yandex_ad_l2_task = deepcopy(base_task)
+	yandex_ad_l2_task['params']['find-bias'] = 1;
+	yandex_ad_l2_task['params']['linear-search'] = 1;
+	yandex_ad_l2_task['params']['ada-alpha'] = 1;
+	yandex_ad_l2_task['params']['async-cycle'] = 1
+
+#
+#----------------------------------------------------
+#	"fram" dataset
+#----------------------------------------------------
+
+	base_task = {
+		'train_tables':		'dlr/data/fram.train.ii',
+		'label_table':		'dlr/data/fram.train.label',
+		'test_file':		'/home/trofim/dlr_data/yandex_ad2.test2.svm',
+		'jobcount':		64,
+		'params': {
+			'iterations':		20,
+			'lambda-1':		0,
+			'lambda-2':		40,
+			'termination':		0.0,
+			'combine-type':		0,
+			'save-per-iter':	1,
+			'beta-max':		10,
+			},
+		'etalon_loss': 16986380.197,
+		}
+
+	fram_task = deepcopy(base_task)
+	fram_task['params']['find-bias'] = 1;
+	fram_task['params']['linear-search'] = 1;
+	fram_task['params']['ada-alpha'] = 1;
+	fram_task['params']['async-cycle'] = 1
+
 
 #	task = deepcopy(base_task)
 #	task['params']['combine-type'] = 1;
@@ -128,7 +215,7 @@ if __name__ == '__main__':
 		'test_file':		'/home/trofim/dlr_data/epsilon_normalized.t',
 		'jobcount':		16,
 		'params': {
-			'iterations':		100,
+			'iterations':		150,
 			'lambda-1':		2.0,
 			'termination':		0.0e-6,
 			'combine-type':		0,
@@ -141,10 +228,57 @@ if __name__ == '__main__':
 	epsilon_task = deepcopy(base_task)
 	epsilon_task['params']['linear-search'] = 1;
 	epsilon_task['params']['last-iter-sum'] = 1;
+	epsilon_task['params']['async-cycle'] = 1
 
-#	epsilon_task['params']['admm'] = 1
-#	epsilon_task['params']['rho'] = 1
-#	epsilon_task['params']['loss'] = 1
+#
+#----------------------------------------------------
+#	"epsilon" dataset, reg path
+#----------------------------------------------------
+
+	base_task = {
+		'train_tables':		'dlr/data/epsilon.train.ii2',
+		'label_table':		'dlr/data/epsilon.train.label',
+		'test_file':		'/home/trofim/dlr_data/epsilon_normalized.t',
+		'jobcount':		16,
+		'params': {
+			'iterations':		100,
+			'termination':		1.0e-3,
+			'combine-type':		0,
+			'beta-max':		100,
+			'lambda-path':		20,
+			'scad-a':		3,
+			},
+		'etalon_loss': 105958.76,
+		}
+
+	epsilon_path_task = deepcopy(base_task)
+#	epsilon_path_task['params']['linear-search'] = 1;
+	epsilon_path_task['params']['last-iter-sum'] = 1;
+
+#----------------------------------------------------
+#	L2: "epsilon" dataset
+#----------------------------------------------------
+
+	base_task = {
+		'train_tables':		'dlr/data/epsilon.train.ii2',
+		'label_table':		'dlr/data/epsilon.train.label',
+		'test_file':		'/home/trofim/dlr_data/epsilon.test2.svm',
+		'jobcount':		16,
+		'params': {
+			'iterations':		100,
+			'lambda-1':		0.0,
+			'lambda-2':		0.25,
+			'termination':		0.0e-6,
+			'combine-type':		0,
+			'save-per-iter':	1,
+			'beta-max':		100,
+			},
+		'etalon_loss': 105958.76,
+		}
+
+	epsilon_l2_task = deepcopy(base_task)
+	epsilon_l2_task['params']['linear-search'] = 1;
+	epsilon_l2_task['params']['async-cycle'] = 1
 
 
 #----------------------------------------------------
@@ -173,6 +307,31 @@ if __name__ == '__main__':
 	webspam_task['params']['last-iter-sum'] = 1;
 #	webspam_task['params']['lambda-1'] = get_lambda_list([pow(2, -x) for x in xrange(-2, 12)])
 #	webspam_task['params']['lambda-path'] = 20
+
+#----------------------------------------------------
+#	"webspam" dataset L2
+#----------------------------------------------------
+#
+	base_task = {
+                'train_tables':         'dlr/data/webspam.train.ii2', 
+                'label_table':          'dlr/data/webspam.train.label',
+                'test_file':            '/home/trofim/dlr_data/webspam_wc_normalized_trigram.test2.svm',
+		'jobcount':		16,
+		'params': {
+			'iterations':		100,
+			'lambda-1':		0,
+			'lambda-2':		1 / 4.0,
+			'termination':		0.0,
+			'combine-type':		0,
+			'save-per-iter':	1,
+			'beta-max':		1.0e6,
+			},
+		'etalon_loss': 2005.81766840625
+		}
+
+	webspam_l2_task = deepcopy(base_task)
+	webspam_l2_task['params']['async-cycle'] = 1
+	webspam_l2_task['params']['linear-search'] = 1;
 
 #	tasks.append(task)
 
@@ -263,9 +422,74 @@ if __name__ == '__main__':
 
 #		tasks.append(deepcopy(epsilon_task))
 
-	tasks.append(deepcopy(webspam_task))
+#	for async_count in [1, 2, 4, 8]:
+#		epsilon_task['params']['async-cycle'] = 1
+#		epsilon_task['params']['async-count'] = async_count
+#		epsilon_task['params']['iterations'] = 100 * async_count
+#		epsilon_task['params']['ada-alpha'] = 1
+#		tasks.append(deepcopy(epsilon_task))
 
-#	create_reports('./dump-20141023-9', None)
+#	for i in xrange(9):
+#		epsilon_task['params']['admm'] = 1
+#		epsilon_task['params']['rho'] = pow(4, -1)
+#		epsilon_task['params']['loss'] = 1
+#		tasks.append(deepcopy(epsilon_task))
+#
+#		del epsilon_task['params']['admm']
+#		epsilon_task['params']['async-cycle'] = 1
+#		tasks.append(deepcopy(epsilon_task))
+#
+#
+#	for i in xrange(9):
+#		epsilon_task['params']['admm'] = 1
+#		epsilon_task['params']['rho'] = pow(4, -1)
+#		epsilon_task['params']['loss'] = 1
+#		tasks.append(deepcopy(epsilon_task))
+
+#	epsilon_task['params']['admm'] = 1
+#	epsilon_task['params']['rho'] = 1
+#	epsilon_task['params']['loss'] = 1
+#	tasks.append(deepcopy(epsilon_task))
+
+#	yandex_ad_task['params']['async-cycle'] = 0
+#	tasks.append(deepcopy(yandex_ad_task))
+	
+#	yandex_ad_task['params']['async-cycle'] = 1
+#	tasks.append(deepcopy(yandex_ad_task))
+
+#	for i in xrange(4):
+#		yandex_ad_task['params']['admm'] = 1
+#		yandex_ad_task['params']['rho'] = 1
+#		yandex_ad_task['params']['loss'] = 1
+#		tasks.append(deepcopy(yandex_ad_task))
+
+#		yandex_ad_task['params']['async-cycle'] = 0
+#		tasks.append(deepcopy(yandex_ad_task))
+	
+#		yandex_ad_task['params']['async-cycle'] = 1
+#		tasks.append(deepcopy(yandex_ad_task))
+
+#	for i in xrange(4):
+#		for jobcount in [64, 32, 16, 8, 4, 2, 1]:
+#			yandex_ad_task['jobcount'] = jobcount
+#			yandex_ad_task['params']['iterations'] =  jobcount / 2 + 5
+#			tasks.append(deepcopy(yandex_ad_task))
+
+#	tasks.append(deepcopy(yandex_ad_task))
+#	for i in xrange(1):
+#		tasks.append(deepcopy(yandex_ad_l2_task))
+
+#	tasks.append(yandex_ad_scad_task)
+#	epsilon_task['params']['admm'] = 1
+#	epsilon_task['params']['rho'] = pow(4, -1)
+#	epsilon_task['params']['loss'] = 1
+#1
+	for jobcount in [64, 32, 16, 8, 4, 2, 1]:
+		yandex_ad_l2_task['jobcount'] = jobcount
+		yandex_ad_l2_task['params']['iterations'] = jobcount / 3 + 5
+		tasks.append(deepcopy(yandex_ad_l2_task))
+
+#	tasks.append(webspam_l2_task)
 
 	for task in tasks:
 		process_task(task, should_create_reports = True)
