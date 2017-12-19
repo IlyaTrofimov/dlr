@@ -41,7 +41,7 @@ using std::to_string;
 #define SQUARE(x) ((x) * (x))
 #define LIMIT(x, min, max) ( (x) < min ? min : ((x) > max ? max : (x))) 
 
-#define NU 1.e-9
+#define NU 1.e-6
 #define SIGMA 0.01
 #define MAX_betaTx 100.0
 #define P_MIN 1.0e-6
@@ -3003,7 +3003,7 @@ int solve_lasso(int iterations_max, const po::variables_map& vm, string cache_fi
 			//memcpy(x, xk, sizeof(float) * g_feature_count);
 			//accumulate_vector(g_master_location, x, g_feature_count);
 
-			save_sparse_beta(filename, x);
+			save_sparse_beta(filename, g_cache.GetFeatureMap(), x);
 		}
 
 		if (iter >= 2) {
@@ -3019,8 +3019,8 @@ int solve_lasso(int iterations_max, const po::variables_map& vm, string cache_fi
 	}
 
 
-	if (!vm["final-regressor"].empty())
-		save_sparse_beta(vm["final-regressor"].as<string>(), x);
+	if (!vm["final-regressor"].empty()) 
+		save_sparse_beta(vm["final-regressor"].as<string>(), g_cache.GetFeatureMap(), x);
 
 	printf("\n");	
 	print_time_summary();
