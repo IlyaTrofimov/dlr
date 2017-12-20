@@ -2,7 +2,6 @@
 import os
 import sys
 import random
-from train_dlr_hadoop_lib import merge_models
 
 def execute(cmd):
 	''' Simple wrapper for bash scripts '''
@@ -52,16 +51,6 @@ def fast_test(cmd, ethalon_filename, tolerance = 1.0e-4, head = 0, model = 'tmp_
 if __name__ == '__main__':
 
 	execute('gunzip small_train_ro_0.1.ii2.gz -c > small_train_ro_0.1.ii2')
-
-	#unique_id = random.randint(0, 1000000)
-	#server = '172.17.42.1'
-	#train_args = '-c 0 --iterations 10 --termination 0.0 --lambda-1 16 --linear-search 1 -l small_train_ro_0.1.label --sparse-model 1 --server %s --unique-id %d --total 2' % (server, unique_id)
-
-	#print 'Testing d-GLMNET, sync, distributed'
-	#cmd = './dlr -d train.dist1.ii --node 0 -f tmp_model1 %s > log0 &\n' % train_args
-	#cmd += './dlr -d train.dist2.ii --node 1 -f tmp_model2 %s > log1' % train_args
-
-	#fast_test(cmd, 'ethalon_model_dist', tolerance = 1.0e-2, head = 50, model = ['tmp_model1', 'tmp_model2'])
 
 	print 'Testing d-GLMNET, async'
 	fast_test('./dlr -d small_train_ro_0.1.ii2 --iterations 10 --termination 0.0 --lambda-1 16 -f tmp_model --last-iter-sum --linear-search 1 -l small_train_ro_0.1.label --sparse-model 1 --async-cycle 1',
